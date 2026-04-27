@@ -5,37 +5,57 @@
 // ============================================================
 
 // -- Game states --
-const STATE_TITLE = 0;
-const STATE_MAP   = 1;
+const STATE_TITLE   = 0;
+const STATE_STORY   = 1;
+const STATE_PADDOCK = 2;
+const STATE_MAP     = 3;
 let gameState = STATE_TITLE;
 
 // -- Player --
 let pupName = "";
-let nameInput;
-let startButton;
 let typingName = true;
 let cursorBlink = 0;
 
-// -- Map / Camera --
-const TILE = 32;
-const MAP_COLS = 40;
-const MAP_ROWS = 30;
-const MAP_W = MAP_COLS * TILE;
-const MAP_H = MAP_ROWS * TILE;
+// -- Story slideshow --
+let storyIndex = 0;
+let storyFrame = 0;          // frames elapsed in current beat
+let storyFade  = 0;          // 0..1 fade-in for each beat
+const STORY_PANEL_TOP = 0;
+const STORY_PANEL_BOT = 360; // caption area below
+const STORY_BEATS = 5;
 
-let camX = 0;
-let camY = 0;
+// -- Paddock layout (single-screen, top-down) --
+const PAD_X = 110, PAD_Y = 170;
+const PAD_W = 420, PAD_H = 220;
+const GATE_W = 80;
+const GATE_CX = PAD_X + PAD_W / 2;
 
-// -- Pup (overworld) --
-let pup = { x: 20 * TILE, y: 25 * TILE, dir: 0, frame: 0, speed: 2.5 };
-// dir: 0=down, 1=left, 2=right, 3=up
+// -- Pup (shared, used in paddock) --
+let pup = {
+  x: PAD_X + PAD_W / 2,
+  y: PAD_Y + PAD_H / 2 + 20,
+  dir: 0, frame: 0, speed: 2.2
+};
 let moving = false;
+let bumpTimer = 0;       // brief flash when hitting fence
+let gateNudges = 0;      // counts how many times player has poked the gate
+let gateOpen = false;    // becomes true after biting the latch
+let gateSwing = 0;       // animation amount for the gate opening (0..1)
 
-// -- Fair booths / landmarks (colored rectangles for now) --
+// -- Action / message system --
+let actionMessage = "";
+let actionMessageTimer = 0;
+let animalJumpTimer = 0; // bark startles the neighbours
+
+// -- Overworld (retained for later use; not entered in this build) --
+const TILE = 32;
+const MAP_COLS = 40, MAP_ROWS = 30;
+const MAP_W = MAP_COLS * TILE, MAP_H = MAP_ROWS * TILE;
+let camX = 0, camY = 0;
 let landmarks = [];
 
 // ============================================================
-//  SETUP
+//  SETUP / DRAW
 // ============================================================
 function setup() {
   createCanvas(640, 480);
@@ -43,12 +63,14 @@ function setup() {
   buildLandmarks();
 }
 
-// ============================================================
-//  DRAW
-// ============================================================
 function draw() {
   if (gameState === STATE_TITLE) {
     drawTitle();
+  } else if (gameState === STATE_STORY) {
+    drawStory();
+  } else if (gameState === STATE_PADDOCK) {
+    updatePaddock();
+    drawPaddock();
   } else if (gameState === STATE_MAP) {
     updateMap();
     drawMap();
@@ -59,17 +81,12 @@ function draw() {
 //  TITLE SCREEN
 // ============================================================
 function drawTitle() {
-  // Sky gradient
   for (let y = 0; y < height; y++) {
     let t = y / height;
-    let r = lerp(60, 20, t);
-    let g = lerp(120, 50, t);
-    let b = lerp(200, 100, t);
-    stroke(r, g, b);
+    stroke(lerp(60, 20, t), lerp(120, 50, t), lerp(200, 100, t));
     line(0, y, width, y);
   }
 
-  // Stars
   noStroke();
   randomSeed(42);
   for (let i = 0; i < 60; i++) {
@@ -80,60 +97,42 @@ function drawTitle() {
     ellipse(sx, sy, random(1.5, 3));
   }
 
-  // Ferris wheel silhouette (background detail)
   drawFerrisWheel(width * 0.75, height * 0.42, 80);
 
-  // Title
   noStroke();
   textAlign(CENTER, CENTER);
-
-  // Shadow
   fill(0, 0, 0, 80);
   textSize(52);
   text("LOST PUP", width / 2 + 2, 102);
-
-  // Main title
   fill(255, 230, 130);
-  textSize(52);
   text("LOST PUP", width / 2, 100);
 
-  // Subtitle
   fill(200, 200, 220, 180);
   textSize(14);
   text("a state fair adventure", width / 2, 145);
 
-  // Dog sprite on title
   drawPupSprite(width / 2, 210, 3, 0, true);
 
-  // Name prompt
   fill(255, 255, 255, 220);
   textSize(16);
   text("Name your pup:", width / 2, 280);
 
-  // Name input box
-  let boxW = 220;
-  let boxH = 36;
+  let boxW = 220, boxH = 36;
   let boxX = width / 2 - boxW / 2;
   let boxY = 300;
-
   fill(20, 20, 40, 200);
   stroke(180, 180, 220, 150);
   strokeWeight(2);
   rect(boxX, boxY, boxW, boxH, 6);
 
-  // Name text
   noStroke();
-  fill(255, 255, 255);
+  fill(255);
   textSize(20);
-  textAlign(CENTER, CENTER);
   let displayName = pupName;
   cursorBlink += 0.06;
-  if (sin(cursorBlink) > 0 && typingName) {
-    displayName += "_";
-  }
+  if (sin(cursorBlink) > 0 && typingName) displayName += "_";
   text(displayName, width / 2, boxY + boxH / 2);
 
-  // Start hint
   if (pupName.length > 0) {
     let alpha = 150 + 100 * sin(frameCount * 0.05);
     fill(255, 230, 130, alpha);
@@ -145,7 +144,6 @@ function drawTitle() {
     text("type a name to begin", width / 2, 380);
   }
 
-  // Footer
   fill(140, 140, 160, 100);
   textSize(10);
   text("SNIFF · BARK · BITE", width / 2, height - 20);
@@ -158,7 +156,6 @@ function drawFerrisWheel(cx, cy, r) {
   noFill();
   ellipse(cx, cy, r * 2, r * 2);
 
-  // Spokes
   let spokeCount = 8;
   let rot = frameCount * 0.005;
   for (let i = 0; i < spokeCount; i++) {
@@ -166,8 +163,6 @@ function drawFerrisWheel(cx, cy, r) {
     let ex = cx + cos(a) * r;
     let ey = cy + sin(a) * r;
     line(cx, cy, ex, ey);
-
-    // Gondola
     fill(60, 70, 100, 100);
     noStroke();
     rect(ex - 5, ey - 2, 10, 8, 2);
@@ -176,7 +171,6 @@ function drawFerrisWheel(cx, cy, r) {
     noFill();
   }
 
-  // Support
   stroke(40, 50, 80, 140);
   strokeWeight(3);
   line(cx, cy, cx - r * 0.5, cy + r + 20);
@@ -185,67 +179,1390 @@ function drawFerrisWheel(cx, cy, r) {
 }
 
 // ============================================================
-//  MAP LANDMARKS
+//  STORY SLIDESHOW
 // ============================================================
-function buildLandmarks() {
-  landmarks = [
-    // Main path entrance area (bottom)
-    { x: 17, y: 26, w: 6, h: 2, color: [120, 90, 60],   label: "Entrance Gate" },
+function drawStory() {
+  storyFrame++;
+  storyFade = constrain(storyFrame / 30, 0, 1);
 
-    // Food row
-    { x: 3,  y: 20, w: 4, h: 3, color: [220, 100, 80],  label: "Corn Dog Stand" },
-    { x: 8,  y: 20, w: 4, h: 3, color: [240, 180, 60],  label: "Funnel Cakes" },
-    { x: 13, y: 20, w: 4, h: 3, color: [255, 130, 50],  label: "BBQ Pit" },
+  background(0);
 
-    // Games row
-    { x: 24, y: 20, w: 5, h: 3, color: [80, 180, 220],  label: "Ring Toss" },
-    { x: 30, y: 20, w: 5, h: 3, color: [100, 200, 140], label: "Balloon Darts" },
+  // Each beat draws into the panel area (0..STORY_PANEL_BOT)
+  if      (storyIndex === 0) drawBeatArrival();
+  else if (storyIndex === 1) drawBeatFerrisWheel();
+  else if (storyIndex === 2) drawBeatCowChaos();
+  else if (storyIndex === 3) drawBeatFlight();
+  else if (storyIndex === 4) drawBeatWakeUp();
 
-    // Rides area
-    { x: 5,  y: 10, w: 6, h: 5, color: [180, 100, 220], label: "Ferris Wheel" },
-    { x: 14, y: 10, w: 5, h: 4, color: [220, 80, 150],  label: "Tilt-A-Whirl" },
-    { x: 22, y: 10, w: 6, h: 5, color: [100, 120, 220], label: "Bumper Cars" },
+  // Fade-in mask
+  if (storyFade < 1) {
+    noStroke();
+    fill(0, 0, 0, 255 * (1 - storyFade));
+    rect(0, 0, width, STORY_PANEL_BOT);
+  }
 
-    // Animal area
-    { x: 30, y: 10, w: 6, h: 5, color: [140, 180, 80],  label: "Petting Zoo" },
-    { x: 30, y: 5,  w: 6, h: 4, color: [180, 160, 100], label: "Horse Barn" },
+  drawStoryUI();
+}
 
-    // Stage area
-    { x: 5,  y: 3,  w: 8, h: 4, color: [200, 60, 60],   label: "Main Stage" },
+function drawStoryUI() {
+  // Caption box
+  noStroke();
+  fill(15, 15, 22);
+  rect(0, STORY_PANEL_BOT, width, height - STORY_PANEL_BOT);
+  stroke(180, 180, 220, 80);
+  strokeWeight(1);
+  line(0, STORY_PANEL_BOT, width, STORY_PANEL_BOT);
 
-    // Restrooms / info
-    { x: 16, y: 3,  w: 3, h: 2, color: [100, 100, 110],  label: "Restrooms" },
+  noStroke();
+  fill(255, 230, 200);
+  textAlign(LEFT, TOP);
+  textSize(13);
+  text(getStoryCaption(storyIndex, pupName), 24, STORY_PANEL_BOT + 18, width - 48, 80);
 
-    // The family's picnic spot (goal area hint)
-    { x: 22, y: 2,  w: 5, h: 3, color: [255, 220, 100],  label: "Picnic Area" },
-  ];
+  // Page count
+  textAlign(RIGHT, BOTTOM);
+  textSize(10);
+  fill(140, 140, 160);
+  text("scene " + (storyIndex + 1) + " / " + STORY_BEATS, width - 16, height - 10);
+
+  // Advance hint
+  let alpha = 150 + 100 * sin(frameCount * 0.06);
+  fill(255, 230, 130, alpha);
+  textAlign(LEFT, BOTTOM);
+  textSize(11);
+  let hint = (storyIndex < STORY_BEATS - 1)
+    ? "[ press SPACE / ENTER for next ]"
+    : "[ press SPACE / ENTER to play ]";
+  text(hint, 16, height - 10);
+}
+
+function getStoryCaption(i, name) {
+  let n = name && name.length ? name : "the pup";
+  switch (i) {
+    case 0: return "It was a sunny morning, and the family arrived at the state fair with " + n + " happily tagging along.";
+    case 1: return "While the family climbed aboard the Ferris wheel, they tied " + n + "'s leash to a temporary barrier nearby.";
+    case 2: return "A farmer paused to pose her prize cow for a photo. The flash spooked the cow — it bolted, knocking the fence over!";
+    case 3: return "Caught in the panic, " + n + " slipped free and fled through the crowd, frantically searching for the family.";
+    case 4: return "" + n + " awoke in a small holding pen — the fair helpers had scooped up the loose pup and locked it in the small-animal paddock.";
+  }
+  return "";
+}
+
+// -- Beat 1: arrival at the fair --
+function drawBeatArrival() {
+  // Sky gradient
+  for (let y = 0; y < STORY_PANEL_BOT; y++) {
+    let t = y / STORY_PANEL_BOT;
+    stroke(lerp(120, 200, t), lerp(180, 220, t), lerp(240, 230, t));
+    line(0, y, width, y);
+  }
+  noStroke();
+
+  // Sun
+  fill(255, 240, 180, 90);
+  ellipse(width - 100, 70, 110);
+  fill(255, 235, 150);
+  ellipse(width - 100, 70, 60);
+
+  // Distant ferris wheel
+  drawFerrisWheel(110, 130, 38);
+
+  // Distant tents
+  drawTent(220, 200, 50, [220, 90, 80]);
+  drawTent(290, 195, 60, [80, 140, 200]);
+  drawTent(380, 200, 55, [220, 180, 70]);
+  drawTent(460, 198, 50, [120, 180, 100]);
+
+  // Ground
+  fill(110, 170, 80);
+  rect(0, 245, width, STORY_PANEL_BOT - 245);
+  // Path leading up to entrance
+  fill(190, 165, 130);
+  beginShape();
+  vertex(width / 2 - 90, STORY_PANEL_BOT);
+  vertex(width / 2 + 90, STORY_PANEL_BOT);
+  vertex(width / 2 + 35, 245);
+  vertex(width / 2 - 35, 245);
+  endShape(CLOSE);
+
+  // Fair entrance arch
+  drawFairArch(width / 2, 245, 230);
+
+  // Family + pup walking in (slow bob)
+  let t = storyFrame * 0.08;
+  let bob = sin(t) * 1.5;
+  let approach = constrain(storyFrame * 0.3, 0, 60);
+  let fy = STORY_PANEL_BOT - 35 - approach * 0.1;
+  drawHuman(width / 2 - 70, fy + bob, 1.0, [70, 95, 150], [220, 195, 175], "dad");
+  drawHuman(width / 2 - 35, fy - bob, 0.95, [180, 80, 100], [240, 215, 195], "mom");
+  drawHuman(width / 2 + 5, fy + bob, 0.7, [230, 190, 70], [255, 220, 200], "kid");
+  drawPupSideView(width / 2 + 40, fy + 10 - bob * 0.6, 1.2, true);
+
+  // Floating balloon
+  let by = 235 + sin(t * 0.7) * 6;
+  fill(220, 70, 90);
+  ellipse(width / 2 + 20, by, 14, 17);
+  stroke(40);
+  strokeWeight(1);
+  line(width / 2 + 20, by + 8, width / 2 + 5, fy - 12);
+  noStroke();
+}
+
+// -- Beat 2: Ferris wheel & tied-up pup --
+function drawBeatFerrisWheel() {
+  // Sky (afternoon)
+  for (let y = 0; y < STORY_PANEL_BOT; y++) {
+    let t = y / STORY_PANEL_BOT;
+    stroke(lerp(255, 240, t), lerp(180, 200, t), lerp(140, 180, t));
+    line(0, y, width, y);
+  }
+  noStroke();
+
+  // Ground
+  fill(120, 165, 85);
+  rect(0, 280, width, STORY_PANEL_BOT - 280);
+
+  // Big ferris wheel center-stage
+  let wcx = width * 0.5;
+  let wcy = 170;
+  let wr = 130;
+  drawBigFerrisWheel(wcx, wcy, wr, true);
+
+  // Crowd silhouettes walking past in the foreground
+  for (let i = 0; i < 5; i++) {
+    let cx = (frameCount * 0.4 + i * 130) % (width + 80) - 40;
+    let cy = 320 + (i % 2) * 6;
+    drawCrowdPerson(cx, cy, 0.7, 60 + i * 30);
+  }
+
+  // Barrier / fence post in foreground with pup tied to it
+  let fx = width * 0.22;
+  let fy = 320;
+  // Fence panel (chain-link-ish vertical posts)
+  stroke(80, 60, 40);
+  strokeWeight(3);
+  line(fx - 40, fy + 20, fx + 40, fy + 20);
+  line(fx - 40, fy + 5,  fx + 40, fy + 5);
+  for (let i = -2; i <= 2; i++) {
+    line(fx + i * 18, fy - 8, fx + i * 18, fy + 30);
+  }
+  noStroke();
+  // post caps
+  fill(60, 40, 25);
+  for (let i = -2; i <= 2; i++) {
+    ellipse(fx + i * 18, fy - 8, 4, 4);
+  }
+
+  // Pup sitting tied to it
+  let pupX = fx + 5;
+  let pupY = fy + 36;
+  drawPupSideView(pupX, pupY, 1.4, false);
+
+  // Leash from collar to fence post
+  stroke(220, 60, 60);
+  strokeWeight(2);
+  noFill();
+  bezier(pupX - 5, pupY - 4, pupX - 12, pupY - 18, fx - 15, fy + 5, fx - 18, fy + 8);
+  noStroke();
+}
+
+function drawBigFerrisWheel(cx, cy, r, animated) {
+  push();
+  // Wheel rim
+  stroke(80, 60, 40);
+  strokeWeight(4);
+  noFill();
+  ellipse(cx, cy, r * 2, r * 2);
+  stroke(120, 90, 50);
+  strokeWeight(2);
+  ellipse(cx, cy, r * 1.92, r * 1.92);
+
+  let spokeCount = 8;
+  let rot = animated ? frameCount * 0.006 : 0;
+  for (let i = 0; i < spokeCount; i++) {
+    let a = rot + (TWO_PI / spokeCount) * i;
+    let ex = cx + cos(a) * r;
+    let ey = cy + sin(a) * r;
+    stroke(80, 60, 40);
+    strokeWeight(2);
+    line(cx, cy, ex, ey);
+
+    // Gondola
+    let gColors = [
+      [220, 80, 80], [240, 200, 80], [120, 200, 130],
+      [80, 160, 220], [180, 110, 220], [240, 130, 170],
+      [80, 200, 200], [240, 160, 80]
+    ];
+    let gc = gColors[i];
+    noStroke();
+    fill(60, 40, 30);
+    line(ex, ey, ex, ey + 8);
+    stroke(60, 40, 30);
+    strokeWeight(1);
+    line(ex, ey, ex, ey + 8);
+    noStroke();
+    fill(gc[0], gc[1], gc[2]);
+    rect(ex - 9, ey + 8, 18, 12, 3);
+    fill(220, 230, 255, 200);
+    rect(ex - 7, ey + 10, 14, 5);
+
+    // The family is in the topmost gondola (highlighted)
+    if (i === 6) { // approximately top after rotation
+      // tiny waving figures
+      fill(60, 70, 120);
+      ellipse(ex - 4, ey + 11, 3, 3);
+      fill(180, 80, 100);
+      ellipse(ex,    ey + 11, 3, 3);
+      fill(230, 190, 70);
+      ellipse(ex + 4, ey + 11, 3, 3);
+    }
+  }
+
+  // Center hub
+  noStroke();
+  fill(60, 40, 25);
+  ellipse(cx, cy, 18, 18);
+  fill(200, 180, 120);
+  ellipse(cx, cy, 10, 10);
+
+  // Support legs
+  stroke(80, 60, 40);
+  strokeWeight(5);
+  line(cx, cy, cx - r * 0.55, cy + r + 24);
+  line(cx, cy, cx + r * 0.55, cy + r + 24);
+  pop();
+}
+
+// -- Beat 3: Cow chaos --
+function drawBeatCowChaos() {
+  // Sky / background tinted by camera flash
+  let flashCycle = (storyFrame % 90);
+  let flashAmt = 0;
+  if (flashCycle < 8) flashAmt = 1 - flashCycle / 8;
+
+  // Sky
+  for (let y = 0; y < STORY_PANEL_BOT; y++) {
+    let t = y / STORY_PANEL_BOT;
+    stroke(lerp(220, 230, t), lerp(180, 210, t), lerp(140, 160, t));
+    line(0, y, width, y);
+  }
+  noStroke();
+
+  // Ground
+  fill(120, 165, 85);
+  rect(0, 240, width, STORY_PANEL_BOT - 240);
+
+  // Distant booths
+  drawTent(80, 220, 55, [180, 100, 120]);
+  drawTent(540, 215, 60, [110, 160, 200]);
+
+  // Photographer (left)
+  drawPhotographer(120, 290, 1.0);
+
+  // Cow rearing in the middle
+  let shake = sin(storyFrame * 0.6) * 2;
+  drawCow(330 + shake, 300, 1.4, true);
+
+  // Farmer (right) being yanked by the rope
+  drawFarmer(440, 295, 1.0);
+  // Rope from farmer's hand to cow's head
+  stroke(220, 200, 150);
+  strokeWeight(2);
+  noFill();
+  bezier(425, 280, 400, 270, 380, 260, 305, 260 + shake);
+  noStroke();
+
+  // Knocked-over fence pieces
+  push();
+  translate(220, 320);
+  rotate(-0.4);
+  fill(140, 100, 60);
+  rect(0, 0, 60, 5);
+  rect(0, 12, 60, 5);
+  pop();
+  push();
+  translate(280, 335);
+  rotate(0.2);
+  fill(140, 100, 60);
+  rect(0, 0, 50, 4);
+  pop();
+
+  // Tied pup in panic, leash snapping
+  let panicX = 250 + sin(storyFrame * 0.4) * 3;
+  drawPupSideView(panicX, 335, 1.0, false);
+  // panic squiggles above pup
+  stroke(40);
+  strokeWeight(1.5);
+  noFill();
+  for (let i = 0; i < 3; i++) {
+    let sx = panicX - 12 + i * 10;
+    line(sx, 312, sx + 3, 308);
+    line(sx + 3, 308, sx, 304);
+  }
+  noStroke();
+
+  // Camera flash burst
+  if (flashAmt > 0) {
+    // White overlay
+    fill(255, 255, 255, 220 * flashAmt);
+    rect(0, 0, width, STORY_PANEL_BOT);
+
+    // Flash rays from photographer
+    push();
+    translate(132, 270);
+    stroke(255, 255, 200, 230 * flashAmt);
+    strokeWeight(3);
+    for (let a = -PI/2 - 0.6; a <= -PI/2 + 0.6; a += 0.15) {
+      line(0, 0, cos(a) * 200, sin(a) * 200);
+    }
+    pop();
+  }
+
+  // "*FLASH!*" text
+  if (flashAmt > 0.2) {
+    push();
+    translate(165, 230);
+    rotate(-0.15);
+    noStroke();
+    fill(255, 240, 80);
+    textAlign(CENTER, CENTER);
+    textSize(28);
+    text("*FLASH!*", 0, 0);
+    pop();
+  }
+}
+
+// -- Beat 4: The flight --
+function drawBeatFlight() {
+  // Sky a bit later, dustier
+  for (let y = 0; y < STORY_PANEL_BOT; y++) {
+    let t = y / STORY_PANEL_BOT;
+    stroke(lerp(230, 220, t), lerp(170, 180, t), lerp(120, 130, t));
+    line(0, y, width, y);
+  }
+  noStroke();
+
+  // Ground
+  fill(140, 130, 90);
+  rect(0, 250, width, STORY_PANEL_BOT - 250);
+
+  // Crowd of legs in background, jumbled
+  for (let i = 0; i < 14; i++) {
+    let cx = (i * 47 + (frameCount * 0.6) % 47) % width;
+    let cy = 245 + (i % 3) * 10;
+    drawCrowdPerson(cx, cy + 18, 0.85, 90 + i * 17);
+  }
+
+  // Dust clouds (plumes left behind by the running pup)
+  for (let i = 0; i < 6; i++) {
+    let dx = 380 - i * 35 + sin(frameCount * 0.1 + i) * 2;
+    let dy = 330 + (i % 2) * 6;
+    fill(200, 190, 160, 180 - i * 25);
+    ellipse(dx, dy, 28 - i * 2, 14 - i);
+  }
+
+  // Pup running fast (offset bob)
+  let runBob = sin(frameCount * 0.5) * 2;
+  let runX = 200 + sin(frameCount * 0.05) * 6;
+  drawRunningPup(runX, 320 + runBob, 1.6);
+
+  // Motion lines behind the pup
+  stroke(60, 50, 40, 200);
+  strokeWeight(2);
+  for (let i = 0; i < 5; i++) {
+    let mx = runX + 30 + i * 16;
+    let my = 305 + i * 5;
+    line(mx, my, mx + 14, my);
+  }
+  noStroke();
+
+  // Anxious "?!" above the pup
+  fill(40);
+  textAlign(LEFT, CENTER);
+  textSize(22);
+  text("?!", runX - 20, 290 - sin(frameCount * 0.2) * 2);
+}
+
+// -- Beat 5: Waking up in the holding pen --
+function drawBeatWakeUp() {
+  // Dim barn lighting
+  background(70, 55, 45);
+
+  // Wooden wall behind
+  fill(110, 80, 55);
+  rect(0, 0, width, 130);
+  stroke(80, 55, 35);
+  strokeWeight(1);
+  for (let i = 0; i < 14; i++) {
+    line(i * 50, 0, i * 50, 130);
+  }
+  noStroke();
+  // Beam
+  fill(70, 50, 30);
+  rect(0, 122, width, 8);
+
+  // Window beam of light
+  fill(255, 220, 140, 60);
+  beginShape();
+  vertex(420, 0);
+  vertex(560, 0);
+  vertex(640, 240);
+  vertex(360, 240);
+  endShape(CLOSE);
+
+  // Floor (dirt with hay)
+  fill(150, 110, 70);
+  rect(0, 130, width, STORY_PANEL_BOT - 130);
+  // Hay strands
+  stroke(220, 200, 130);
+  strokeWeight(1);
+  randomSeed(7);
+  for (let i = 0; i < 60; i++) {
+    let hx = random(width);
+    let hy = random(140, STORY_PANEL_BOT - 5);
+    let ang = random(-0.4, 0.4);
+    line(hx, hy, hx + cos(ang) * 6, hy + sin(ang) * 6);
+  }
+  noStroke();
+
+  // Pen fence (foreground rails)
+  drawPenFence(60, 240, 520, 100);
+
+  // Sleeping pup curled up
+  drawSleepingPup(width / 2, 305, 1.6);
+
+  // ZZZ
+  push();
+  let zt = storyFrame * 0.04;
+  noStroke();
+  fill(220, 220, 240, 200);
+  textAlign(LEFT, CENTER);
+  textSize(20);
+  text("z", width / 2 + 30 + sin(zt) * 2, 270 - (zt * 8) % 30);
+  textSize(16);
+  text("z", width / 2 + 22 + sin(zt + 1) * 2, 280 - (zt * 8 + 10) % 30);
+  textSize(12);
+  text("z", width / 2 + 16 + sin(zt + 2) * 2, 286 - (zt * 8 + 20) % 30);
+  pop();
+
+  // A nearby caged rabbit pen for context
+  drawTinyPen(70, 250, 70, 50, [240, 240, 240]); // rabbit
+  drawTinyPen(515, 252, 75, 55, [230, 200, 130]); // chicken
 }
 
 // ============================================================
-//  MAP UPDATE
+//  STORY HELPERS – figures and props
 // ============================================================
-function updateMap() {
-  moving = false;
-  let dx = 0;
-  let dy = 0;
+function drawHuman(x, y, scale, shirt, skin, kind) {
+  push();
+  translate(x, y);
+  let s = scale;
 
-  if (keyIsDown(LEFT_ARROW)  || keyIsDown(65)) { dx = -1; pup.dir = 1; }
-  if (keyIsDown(RIGHT_ARROW) || keyIsDown(68)) { dx =  1; pup.dir = 2; }
-  if (keyIsDown(UP_ARROW)    || keyIsDown(87)) { dy = -1; pup.dir = 3; }
-  if (keyIsDown(DOWN_ARROW)  || keyIsDown(83)) { dy =  1; pup.dir = 0; }
+  // Shadow
+  noStroke();
+  fill(0, 0, 0, 60);
+  ellipse(0, 18 * s, 18 * s, 4 * s);
+
+  // Legs
+  fill(40, 40, 70);
+  rect(-3 * s, 0, 2.5 * s, 14 * s, 1);
+  rect(0.6 * s, 0, 2.5 * s, 14 * s, 1);
+
+  // Body
+  fill(shirt[0], shirt[1], shirt[2]);
+  rect(-5 * s, -16 * s, 10 * s, 18 * s, 2);
+
+  // Arms
+  fill(skin[0], skin[1], skin[2]);
+  rect(-7 * s, -15 * s, 2 * s, 13 * s, 1);
+  rect(5 * s, -15 * s, 2 * s, 13 * s, 1);
+
+  // Head
+  fill(skin[0], skin[1], skin[2]);
+  ellipse(0, -22 * s, 9 * s, 10 * s);
+
+  // Hair
+  if (kind === "mom") {
+    fill(110, 60, 30);
+    arc(0, -23 * s, 11 * s, 9 * s, PI, TWO_PI);
+    fill(110, 60, 30);
+    rect(-5.5 * s, -23 * s, 11 * s, 5 * s, 2);
+  } else if (kind === "kid") {
+    fill(180, 130, 60);
+    arc(0, -23 * s, 9 * s, 7 * s, PI, TWO_PI);
+  } else {
+    fill(60, 40, 25);
+    arc(0, -23 * s, 9 * s, 6 * s, PI, TWO_PI);
+  }
+
+  // Smile
+  noFill();
+  stroke(50, 30, 20);
+  strokeWeight(0.8);
+  arc(0, -20 * s, 3 * s, 2 * s, 0, PI);
+  noStroke();
+
+  pop();
+}
+
+function drawCrowdPerson(x, y, scale, hueSeed) {
+  let s = scale;
+  push();
+  translate(x, y);
+  noStroke();
+  // legs
+  fill(30, 30, 50);
+  rect(-3 * s, 0, 2.5 * s, 14 * s);
+  rect(0.6 * s, 0, 2.5 * s, 14 * s);
+  // body (varied shirt)
+  let r = 80 + (hueSeed * 13) % 160;
+  let g = 80 + (hueSeed * 29) % 160;
+  let b = 80 + (hueSeed * 7) % 160;
+  fill(r, g, b);
+  rect(-5 * s, -16 * s, 10 * s, 18 * s, 2);
+  // head
+  fill(220, 195, 175);
+  ellipse(0, -22 * s, 8 * s, 9 * s);
+  // hair
+  fill(40, 25, 15);
+  arc(0, -23 * s, 8 * s, 6 * s, PI, TWO_PI);
+  pop();
+}
+
+function drawFarmer(x, y, scale) {
+  let s = scale;
+  drawHuman(x, y, scale, [180, 70, 70], [230, 200, 175], "dad");
+  // straw hat brim
+  push();
+  translate(x, y);
+  noStroke();
+  fill(220, 180, 110);
+  ellipse(0, -28 * s, 18 * s, 4 * s);
+  fill(200, 160, 90);
+  rect(-4.5 * s, -32 * s, 9 * s, 5 * s, 2);
+  // overalls strap
+  fill(60, 80, 130);
+  rect(-2 * s, -16 * s, 1.5 * s, 18 * s);
+  pop();
+}
+
+function drawPhotographer(x, y, scale) {
+  let s = scale;
+  drawHuman(x, y, scale, [50, 60, 80], [220, 195, 175], "dad");
+  // hands holding camera up to face
+  push();
+  translate(x, y);
+  noStroke();
+  fill(20, 20, 25);
+  rect(-7 * s, -28 * s, 14 * s, 8 * s, 1);
+  fill(70, 70, 80);
+  ellipse(0, -24 * s, 5 * s, 5 * s);
+  fill(220, 220, 230);
+  ellipse(0, -24 * s, 2.5 * s, 2.5 * s);
+  // little flash bulb on top
+  fill(255, 255, 200);
+  rect(3 * s, -32 * s, 4 * s, 3 * s, 1);
+  pop();
+}
+
+function drawCow(x, y, scale, rearing) {
+  push();
+  translate(x, y);
+  if (rearing) rotate(-0.45);
+  let s = scale;
+
+  noStroke();
+  // body
+  fill(245, 245, 240);
+  ellipse(0, 0, 50 * s, 28 * s);
+  // spots
+  fill(40, 40, 40);
+  ellipse(-10 * s, -3 * s, 12 * s, 9 * s);
+  ellipse(8 * s, 4 * s, 10 * s, 7 * s);
+  ellipse(16 * s, -5 * s, 9 * s, 6 * s);
+  ellipse(-18 * s, 5 * s, 7 * s, 5 * s);
+
+  // back legs (stationary)
+  fill(40, 40, 40);
+  rect(10 * s, 8 * s, 4 * s, 16 * s);
+  rect(16 * s, 8 * s, 4 * s, 16 * s);
+
+  // front legs (kicking up)
+  rect(-12 * s, 4 * s, 4 * s, 14 * s);
+  rect(-6 * s, 4 * s, 4 * s, 14 * s);
+
+  // udder
+  fill(255, 195, 200);
+  ellipse(8 * s, 12 * s, 9 * s, 6 * s);
+
+  // head
+  fill(245, 245, 240);
+  ellipse(-26 * s, -5 * s, 18 * s, 14 * s);
+  // snout
+  fill(220, 175, 175);
+  ellipse(-33 * s, -2 * s, 9 * s, 7 * s);
+  // nostrils
+  fill(120, 80, 80);
+  ellipse(-35 * s, -3 * s, 1.8 * s);
+  ellipse(-35 * s, 0 * s, 1.8 * s);
+  // eye (panicked, wide)
+  fill(255);
+  ellipse(-26 * s, -10 * s, 5 * s, 5 * s);
+  fill(0);
+  ellipse(-25 * s, -10 * s, 2.4 * s, 2.4 * s);
+  // horns
+  fill(225, 205, 165);
+  triangle(-26 * s, -12 * s, -28 * s, -19 * s, -22 * s, -12 * s);
+  triangle(-22 * s, -12 * s, -22 * s, -19 * s, -18 * s, -12 * s);
+  // ear
+  fill(40, 40, 40);
+  ellipse(-19 * s, -12 * s, 6 * s, 4 * s);
+
+  pop();
+}
+
+function drawTent(x, y, w, color) {
+  push();
+  translate(x, y);
+  noStroke();
+  // shadow
+  fill(0, 0, 0, 50);
+  ellipse(0, w * 0.32, w * 1.1, w * 0.18);
+  // body
+  fill(color[0], color[1], color[2]);
+  triangle(-w / 2, w * 0.3, w / 2, w * 0.3, 0, -w * 0.45);
+  // stripe
+  fill(255, 255, 255, 150);
+  triangle(-w / 4, w * 0.15, w / 4, w * 0.15, 0, -w * 0.2);
+  // flag
+  stroke(60, 40, 30);
+  strokeWeight(1);
+  line(0, -w * 0.45, 0, -w * 0.6);
+  noStroke();
+  fill(220, 50, 50);
+  triangle(0, -w * 0.6, 0, -w * 0.5, w * 0.18, -w * 0.55);
+  pop();
+}
+
+function drawFairArch(cx, baseY, w) {
+  push();
+  noStroke();
+  // Posts
+  fill(140, 100, 60);
+  rect(cx - w / 2 - 6, baseY - 90, 12, 90);
+  rect(cx + w / 2 - 6, baseY - 90, 12, 90);
+  // Banner
+  fill(220, 60, 60);
+  rect(cx - w / 2 - 10, baseY - 110, w + 20, 30, 4);
+  fill(255, 235, 130);
+  textAlign(CENTER, CENTER);
+  textSize(15);
+  text("STATE FAIR", cx, baseY - 95);
+  // Bunting
+  stroke(240, 220, 80);
+  strokeWeight(1.5);
+  noFill();
+  for (let i = 0; i < 10; i++) {
+    let x1 = cx - w / 2 + i * (w / 10);
+    let x2 = cx - w / 2 + (i + 1) * (w / 10);
+    arc((x1 + x2) / 2, baseY - 75, x2 - x1, 8, 0, PI);
+  }
+  pop();
+}
+
+function drawPupSideView(x, y, scale, isMoving) {
+  push();
+  translate(x, y);
+  let s = scale;
+
+  // Shadow
+  noStroke();
+  fill(0, 0, 0, 60);
+  ellipse(0, 9 * s, 22 * s, 4 * s);
+
+  // Body
+  fill(180, 130, 70);
+  ellipse(0, 0, 22 * s, 12 * s);
+
+  // Front leg
+  fill(150, 100, 50);
+  let stepF = isMoving ? sin(frameCount * 0.3) * 1.5 * s : 0;
+  rect(-2 * s, 4 * s, 2.4 * s, 6 * s + stepF);
+  rect(4 * s,  4 * s, 2.4 * s, 6 * s - stepF);
+  // Back leg
+  rect(-8 * s, 4 * s, 2.4 * s, 6 * s - stepF);
+  rect(-5 * s, 4 * s, 2.4 * s, 6 * s + stepF);
+
+  // Tail
+  noFill();
+  stroke(180, 130, 70);
+  strokeWeight(2.5 * s);
+  let wag = isMoving ? sin(frameCount * 0.4) * 0.4 : 0.1;
+  arc(-9 * s, -2 * s, 8 * s, 10 * s, -PI - 0.3 + wag, -HALF_PI + wag);
+  noStroke();
+
+  // Head
+  fill(200, 150, 80);
+  ellipse(10 * s, -3 * s, 13 * s, 11 * s);
+
+  // Ear
+  fill(150, 100, 50);
+  triangle(8 * s, -8 * s, 5 * s, -13 * s, 12 * s, -8 * s);
+
+  // Collar
+  fill(220, 60, 60);
+  rect(4 * s, 0 * s, 5 * s, 2 * s);
+
+  // Eye
+  fill(20);
+  ellipse(13 * s, -3 * s, 1.6 * s);
+
+  // Nose
+  fill(40, 25, 25);
+  ellipse(16 * s, -1 * s, 2.4 * s, 1.8 * s);
+
+  // Mouth (small smile)
+  stroke(40, 25, 25);
+  strokeWeight(0.8);
+  noFill();
+  arc(15 * s, 1 * s, 3 * s, 2 * s, 0, PI);
+
+  pop();
+}
+
+function drawRunningPup(x, y, scale) {
+  push();
+  translate(x, y);
+  let s = scale;
+
+  // Body stretched
+  noStroke();
+  fill(0, 0, 0, 70);
+  ellipse(0, 10 * s, 28 * s, 4 * s);
+
+  fill(180, 130, 70);
+  ellipse(0, 0, 26 * s, 11 * s);
+
+  // Legs splayed (running pose)
+  fill(150, 100, 50);
+  let f = sin(frameCount * 0.6) * 3 * s;
+  // back legs
+  rect(-10 * s, 3 * s, 2.4 * s, 7 * s + f);
+  rect(-7 * s, 3 * s, 2.4 * s, 7 * s - f);
+  // front legs
+  rect(5 * s, 3 * s, 2.4 * s, 7 * s + f);
+  rect(8 * s, 3 * s, 2.4 * s, 7 * s - f);
+
+  // Tail (straight back, fearful)
+  noFill();
+  stroke(180, 130, 70);
+  strokeWeight(2.4 * s);
+  line(-12 * s, -2 * s, -20 * s, -1 * s);
+  noStroke();
+
+  // Head
+  fill(200, 150, 80);
+  ellipse(12 * s, -3 * s, 13 * s, 11 * s);
+  // Ears flopping
+  fill(150, 100, 50);
+  triangle(8 * s, -7 * s, 6 * s, -13 * s, 12 * s, -7 * s);
+
+  // Eye wide
+  fill(255);
+  ellipse(15 * s, -4 * s, 4 * s, 4 * s);
+  fill(0);
+  ellipse(16 * s, -4 * s, 2 * s, 2 * s);
+
+  // Nose
+  fill(40, 25, 25);
+  ellipse(18 * s, -1 * s, 2.4 * s, 1.8 * s);
+
+  // Mouth open
+  fill(180, 80, 80);
+  ellipse(17 * s, 2 * s, 4 * s, 3 * s);
+
+  // Tongue
+  fill(230, 100, 110);
+  ellipse(18 * s, 3 * s, 3 * s, 2 * s);
+
+  pop();
+}
+
+function drawSleepingPup(x, y, scale) {
+  push();
+  translate(x, y);
+  let s = scale;
+  noStroke();
+  // shadow
+  fill(0, 0, 0, 80);
+  ellipse(0, 10 * s, 36 * s, 6 * s);
+  // curled body
+  fill(180, 130, 70);
+  ellipse(0, 0, 32 * s, 18 * s);
+  fill(160, 110, 55);
+  arc(0, 0, 32 * s, 18 * s, 0, PI);
+  // head resting on body
+  fill(200, 150, 80);
+  ellipse(-12 * s, 2 * s, 14 * s, 11 * s);
+  // ear
+  fill(150, 100, 50);
+  triangle(-15 * s, -3 * s, -19 * s, -8 * s, -10 * s, -3 * s);
+  // closed eye (line)
+  stroke(40);
+  strokeWeight(1);
+  line(-15 * s, 1 * s, -11 * s, 1 * s);
+  noStroke();
+  // nose
+  fill(40, 25, 25);
+  ellipse(-18 * s, 4 * s, 2.4 * s, 1.8 * s);
+  // tail
+  noFill();
+  stroke(180, 130, 70);
+  strokeWeight(3 * s);
+  arc(10 * s, -2 * s, 14 * s, 14 * s, -HALF_PI, PI);
+  pop();
+}
+
+function drawPenFence(x, y, w, h) {
+  push();
+  noStroke();
+  // top rail
+  fill(120, 85, 55);
+  rect(x, y, w, 6);
+  // bottom rail
+  rect(x, y + h - 6, w, 6);
+  // posts
+  fill(100, 70, 45);
+  for (let i = 0; i <= w; i += 50) {
+    rect(x + i, y - 6, 8, h + 12);
+  }
+  // shadow line
+  stroke(50, 30, 20, 80);
+  strokeWeight(1);
+  line(x, y + h, x + w, y + h);
+  pop();
+}
+
+function drawTinyPen(x, y, w, h, animalColor) {
+  push();
+  noStroke();
+  // pen ground
+  fill(150, 110, 70);
+  rect(x, y, w, h);
+  // wire fence
+  stroke(90, 70, 50);
+  strokeWeight(1);
+  for (let i = 0; i <= w; i += 8) {
+    line(x + i, y, x + i, y + h);
+  }
+  for (let j = 0; j <= h; j += 10) {
+    line(x, y + j, x + w, y + j);
+  }
+  noStroke();
+  // Animal jumps when startled by a bark.
+  let jump = 0;
+  if (animalJumpTimer > 0) {
+    let t = animalJumpTimer / 40;
+    jump = -sin(t * PI) * 8;
+  }
+  // tiny animal
+  fill(animalColor[0], animalColor[1], animalColor[2]);
+  ellipse(x + w / 2, y + h / 2 + 4 + jump, w * 0.5, h * 0.45);
+  fill(animalColor[0] - 20, animalColor[1] - 20, animalColor[2] - 20);
+  ellipse(x + w / 2 + 6, y + h / 2 - 4 + jump, w * 0.25, h * 0.3);
+  // exclamation when jumping
+  if (animalJumpTimer > 20) {
+    fill(40);
+    textAlign(CENTER, CENTER);
+    textSize(12);
+    text("!", x + w / 2 - 14, y + h / 2 - 10 + jump);
+  }
+  pop();
+}
+
+// ============================================================
+//  PADDOCK – starting gameplay state
+// ============================================================
+function updatePaddock() {
+  if (bumpTimer > 0) bumpTimer--;
+  if (actionMessageTimer > 0) actionMessageTimer--;
+  if (animalJumpTimer > 0) animalJumpTimer--;
+  if (gateOpen && gateSwing < 1) gateSwing = min(1, gateSwing + 0.04);
+
+  moving = false;
+  let dx = 0, dy = 0;
+  if (keyIsDown(LEFT_ARROW))  { dx = -1; pup.dir = 1; }
+  if (keyIsDown(RIGHT_ARROW)) { dx =  1; pup.dir = 2; }
+  if (keyIsDown(UP_ARROW))    { dy = -1; pup.dir = 3; }
+  if (keyIsDown(DOWN_ARROW))  { dy =  1; pup.dir = 0; }
 
   if (dx !== 0 || dy !== 0) {
     moving = true;
-    // Normalize diagonal
-    if (dx !== 0 && dy !== 0) {
-      dx *= 0.707;
-      dy *= 0.707;
-    }
+    if (dx !== 0 && dy !== 0) { dx *= 0.707; dy *= 0.707; }
 
     let newX = pup.x + dx * pup.speed;
     let newY = pup.y + dy * pup.speed;
 
-    // Collision with landmarks
+    // Collision: stay inside the paddock interior, except past an open gate.
+    let minX = PAD_X + 12;
+    let maxX = PAD_X + PAD_W - 12;
+    let minY = PAD_Y + 12;
+    let maxY = PAD_Y + PAD_H - 12;
+
+    let bumped = false;
+    if (newX < minX) { newX = minX; bumped = true; }
+    if (newX > maxX) { newX = maxX; bumped = true; }
+    if (newY < minY) { newY = minY; bumped = true; }
+
+    // South side: gated. Pass-through only when the gate is open AND the
+    // pup is roughly within the gate width.
+    let inGateGap = Math.abs(newX - GATE_CX) < GATE_W / 2 - 4;
+    if (newY > maxY && !(gateOpen && inGateGap)) {
+      newY = maxY;
+      bumped = true;
+      if (!gateOpen && Math.abs(newX - GATE_CX) < GATE_W / 2 + 4) {
+        gateNudges++;
+      }
+    }
+    if (bumped) bumpTimer = 12;
+
+    pup.x = newX;
+    pup.y = newY;
+    pup.frame += 0.15;
+  }
+
+  // Once the gate is open and the pup has walked past the south fence line,
+  // hand control off to the overworld.
+  if (gateOpen && pup.y > PAD_Y + PAD_H + 24) {
+    enterOverworld();
+  }
+}
+
+// ---- Paddock actions ----------------------------------------------------
+function setActionMessage(msg, duration) {
+  actionMessage = msg;
+  actionMessageTimer = duration || 240;
+}
+
+function pupNearFence() {
+  let edge = 28;
+  return (pup.x - PAD_X)            < edge
+      || (PAD_X + PAD_W - pup.x)    < edge
+      || (pup.y - PAD_Y)            < edge
+      || (PAD_Y + PAD_H - pup.y)    < edge;
+}
+
+function pupNearGate() {
+  let dy = (PAD_Y + PAD_H) - pup.y;
+  let dx = pup.x - GATE_CX;
+  return dy < 36 && Math.abs(dx) < GATE_W / 2 + 6;
+}
+
+function doSniff() {
+  setActionMessage(
+    pupName + " sniffs the air... rabbits, chickens, sun-warmed dirt, and " +
+    "a faint, delicious whiff of funnel cake on the breeze!");
+}
+
+function doDig() {
+  if (pupNearFence()) {
+    setActionMessage(
+      pupName + " scratches at the dirt by the fence... wire netting is " +
+      "buried along the bottom. The small-animal pens are built tight.");
+  } else {
+    setActionMessage(
+      pupName + " kicks up a small cloud of dirt. Nothing buried here in " +
+      "the middle of the pen.");
+  }
+}
+
+function doBark() {
+  animalJumpTimer = 40;
+  setActionMessage(
+    pupName + " lets out a sharp BARK! The rabbit and chickens jump in " +
+    "their cages — but no one comes to investigate.");
+}
+
+function doBite() {
+  if (pupNearGate()) {
+    if (!gateOpen) {
+      gateOpen = true;
+      setActionMessage(
+        pupName + " chomps down on the latch — *click!* The simple hand " +
+        "latch flips open and the gate swings wide. Head south to escape!");
+    } else {
+      setActionMessage("The gate is already open. Walk south to escape!");
+    }
+  } else {
+    setActionMessage(
+      pupName + " snaps at the air. (Bite works on something specific — " +
+      "maybe the gate's latch?)");
+  }
+}
+
+function enterOverworld() {
+  gameState = STATE_MAP;
+  // Spawn just south of the Horse Barn landmark (tiles 30..35, y=5..8).
+  pup.x = 33 * TILE;
+  pup.y = 9 * TILE + 16;
+  pup.dir = 0;
+  pup.frame = 0;
+  camX = constrain(pup.x - width / 2, 0, MAP_W - width);
+  camY = constrain(pup.y - height / 2, 0, MAP_H - height);
+}
+
+function drawPaddock() {
+  // Sky / outside-the-pen area
+  background(96, 145, 78);
+
+  // Subtle grass texture stripes
+  noStroke();
+  fill(86, 135, 68);
+  for (let i = 0; i < 16; i++) {
+    rect(0, i * 30 + (frameCount * 0.05) % 30, width, 12);
+  }
+
+  // Horse barn building (top of the screen)
+  drawHorseBarn(40, 12, width - 80, 130);
+
+  // Path leading away to the south (blocked at the bottom edge)
+  fill(180, 155, 120);
+  rect(GATE_CX - 35, PAD_Y + PAD_H + 4, 70, height - (PAD_Y + PAD_H + 4));
+  // Path texture
+  fill(165, 140, 105);
+  for (let i = 0; i < 4; i++) {
+    rect(GATE_CX - 30, PAD_Y + PAD_H + 16 + i * 20, 60, 4);
+  }
+
+  // Neighboring small-animal pens
+  drawTinyPen(20, 250, 75, 60, [240, 240, 240]);   // rabbit
+  drawTinyPen(20, 320, 75, 60, [230, 200, 130]);   // chicken
+  drawTinyPen(width - 95, 250, 75, 60, [230, 200, 130]);
+  drawTinyPen(width - 95, 320, 75, 60, [240, 230, 230]);
+
+  // Hay bales decoration just outside the paddock
+  drawHayBale(50, 210);
+  drawHayBale(width - 90, 210);
+
+  // Paddock dirt floor (interior)
+  fill(168, 138, 95);
+  rect(PAD_X, PAD_Y, PAD_W, PAD_H);
+  // Dirt speckles
+  noStroke();
+  randomSeed(11);
+  for (let i = 0; i < 70; i++) {
+    fill(140, 110, 75);
+    let dx = PAD_X + random(PAD_W);
+    let dy = PAD_Y + random(PAD_H);
+    ellipse(dx, dy, random(2, 4), random(2, 4));
+  }
+
+  // Water trough sits inside the paddock (drawn over the dirt)
+  drawWaterTrough(PAD_X + 16, PAD_Y + PAD_H - 36);
+
+  // Paddock fence (top, sides, bottom-with-gate)
+  drawPaddockFence();
+
+  // Pup inside the paddock
+  let bobble = moving ? sin(pup.frame * 4) * 2 : 0;
+  drawPupSprite(pup.x, pup.y + bobble, 1.5, pup.dir, moving);
+
+  // Pup name tag
+  noStroke();
+  fill(0, 0, 0, 90);
+  rect(pup.x - 26, pup.y - 28, 52, 13, 3);
+  fill(255, 255, 255, 230);
+  textAlign(CENTER, CENTER);
+  textSize(10);
+  text(pupName, pup.x, pup.y - 22);
+
+  // Bump flash
+  if (bumpTimer > 0) {
+    fill(255, 80, 80, bumpTimer * 14);
+    noStroke();
+    rect(0, 0, width, height);
+  }
+
+  drawPaddockHUD();
+}
+
+function drawPaddockFence() {
+  push();
+  noStroke();
+
+  // Top rail
+  fill(130, 90, 55);
+  rect(PAD_X - 6, PAD_Y - 6, PAD_W + 12, 6);
+  fill(110, 75, 45);
+  rect(PAD_X - 6, PAD_Y, PAD_W + 12, 4);
+
+  // Left rail
+  fill(130, 90, 55);
+  rect(PAD_X - 6, PAD_Y - 6, 6, PAD_H + 12);
+  // Right rail
+  rect(PAD_X + PAD_W, PAD_Y - 6, 6, PAD_H + 12);
+
+  // Bottom rail (split for the gate)
+  fill(130, 90, 55);
+  rect(PAD_X - 6, PAD_Y + PAD_H, GATE_CX - GATE_W / 2 - (PAD_X - 6), 6);
+  rect(GATE_CX + GATE_W / 2, PAD_Y + PAD_H,
+       (PAD_X + PAD_W + 6) - (GATE_CX + GATE_W / 2), 6);
+
+  // Posts
+  fill(95, 65, 40);
+  for (let i = 0; i <= PAD_W; i += 60) {
+    // top edge posts
+    rect(PAD_X + i - 4, PAD_Y - 12, 8, 10);
+    // bottom edge posts (skip those inside the gate gap)
+    if (PAD_X + i < GATE_CX - GATE_W / 2 - 4 ||
+        PAD_X + i > GATE_CX + GATE_W / 2 + 4) {
+      rect(PAD_X + i - 4, PAD_Y + PAD_H + 4, 8, 10);
+    }
+  }
+  for (let j = 0; j <= PAD_H; j += 60) {
+    rect(PAD_X - 12, PAD_Y + j - 4, 10, 8);
+    rect(PAD_X + PAD_W + 2, PAD_Y + j - 4, 10, 8);
+  }
+
+  // Gate posts
+  fill(80, 55, 30);
+  rect(GATE_CX - GATE_W / 2 - 5, PAD_Y + PAD_H - 6, 5, 18);
+  rect(GATE_CX + GATE_W / 2,     PAD_Y + PAD_H - 6, 5, 18);
+
+  // Gate — hinges on the left post. When open, swings outward toward the
+  // south so the south path is unobstructed.
+  push();
+  translate(GATE_CX - GATE_W / 2, PAD_Y + PAD_H + 3);
+  rotate(gateSwing * HALF_PI);
+  fill(140, 100, 60);
+  rect(4, -6, GATE_W - 8, 6);
+  rect(4, 4,  GATE_W - 8, 6);
+  // Cross brace
+  stroke(110, 75, 40);
+  strokeWeight(2);
+  line(4, 8, GATE_W - 4, -6);
+  noStroke();
+  // Latch + padlock at the far (free) end of the gate
+  if (gateSwing < 0.05) {
+    fill(120, 120, 130);
+    rect(GATE_W - 16, -2, 14, 5, 1);
+    fill(180, 180, 195);
+    ellipse(GATE_W - 4, 1, 8, 9);
+    fill(40);
+    ellipse(GATE_W - 4, 2, 3, 4);
+  } else {
+    // Latch popped open
+    fill(120, 120, 130);
+    rect(GATE_W - 16, -2, 10, 5, 1);
+    fill(180, 180, 195);
+    ellipse(GATE_W - 4, 2, 8, 9);
+    noFill();
+    stroke(160, 160, 175);
+    strokeWeight(2);
+    arc(GATE_W - 4, -2, 6, 7, PI + 0.4, TWO_PI - 0.4);
+    noStroke();
+  }
+  pop();
+  pop();
+}
+
+function drawHorseBarn(x, y, w, h) {
+  push();
+  noStroke();
+  // Roof
+  fill(140, 60, 50);
+  triangle(x - 8, y + 30, x + w + 8, y + 30, x + w / 2, y - 12);
+  // Roof shading
+  fill(110, 45, 38);
+  triangle(x - 8, y + 30, x + w / 2, y + 30, x + w / 2, y - 12);
+
+  // Barn body
+  fill(170, 80, 65);
+  rect(x, y + 28, w, h - 28);
+  // Plank lines
+  stroke(110, 50, 40);
+  strokeWeight(1);
+  for (let i = 0; i < w; i += 20) {
+    line(x + i, y + 28, x + i, y + h);
+  }
+  noStroke();
+
+  // Big barn doors
+  fill(110, 50, 40);
+  rect(x + w / 2 - 38, y + 50, 76, h - 50);
+  fill(80, 35, 25);
+  rect(x + w / 2 - 38, y + 50, 38, h - 50);
+  // X braces on doors
+  stroke(60, 30, 20);
+  strokeWeight(2);
+  line(x + w / 2 - 38, y + 50, x + w / 2,      y + h);
+  line(x + w / 2,      y + 50, x + w / 2 - 38, y + h);
+  line(x + w / 2,      y + 50, x + w / 2 + 38, y + h);
+  line(x + w / 2 + 38, y + 50, x + w / 2,      y + h);
+  noStroke();
+
+  // Hayloft window
+  fill(60, 35, 25);
+  rect(x + w / 2 - 12, y + 4, 24, 22);
+  fill(220, 200, 130);
+  rect(x + w / 2 - 9, y + 7, 18, 16);
+  // Sign
+  fill(240, 230, 200);
+  rect(x + w / 2 - 50, y + h - 26, 100, 16, 3);
+  fill(60, 30, 20);
+  textAlign(CENTER, CENTER);
+  textSize(10);
+  text("HORSE BARN", x + w / 2, y + h - 18);
+  pop();
+}
+
+function drawHayBale(x, y) {
+  push();
+  noStroke();
+  fill(0, 0, 0, 60);
+  ellipse(x + 22, y + 28, 50, 8);
+  fill(220, 190, 110);
+  rect(x, y, 44, 26, 3);
+  fill(200, 165, 90);
+  for (let i = 0; i < 5; i++) line(x + 4, y + 4 + i * 5, x + 40, y + 4 + i * 5);
+  stroke(160, 130, 70);
+  strokeWeight(1);
+  for (let i = 0; i < 5; i++) line(x + 4, y + 4 + i * 5, x + 40, y + 4 + i * 5);
+  noStroke();
+  pop();
+}
+
+function drawWaterTrough(x, y) {
+  push();
+  noStroke();
+  // wood
+  fill(95, 65, 40);
+  rect(x, y, 60, 18, 3);
+  // water
+  fill(80, 140, 200);
+  rect(x + 3, y + 3, 54, 12, 2);
+  // ripple
+  stroke(200, 220, 240, 180);
+  strokeWeight(1);
+  noFill();
+  let rx = x + 30 + sin(frameCount * 0.06) * 6;
+  arc(rx, y + 9, 14, 5, 0, PI);
+  noStroke();
+  pop();
+}
+
+function drawPaddockHUD() {
+  // Top bar
+  noStroke();
+  fill(0, 0, 0, 130);
+  rect(0, 0, width, 28);
+
+  fill(255, 230, 130);
+  textAlign(LEFT, CENTER);
+  textSize(13);
+  text("LOST PUP — " + pupName, 10, 14);
+
+  fill(200, 200, 220, 160);
+  textAlign(RIGHT, CENTER);
+  textSize(11);
+  text("ARROWS to move", width - 10, 14);
+
+  // Bottom info bubble: dynamic message on top, action keys below.
+  let bx = 16, bw = width - 32;
+  let bh = 70, by = height - bh - 8;
+
+  noStroke();
+  fill(0, 0, 0, 165);
+  rect(bx, by, bw, bh, 6);
+  noFill();
+  stroke(255, 230, 130, 120);
+  strokeWeight(1);
+  rect(bx, by, bw, bh, 6);
+  noStroke();
+
+  // Pick the message to display.
+  let msg;
+  if (actionMessageTimer > 0) {
+    msg = actionMessage;
+  } else if (gateOpen) {
+    msg = "The gate is open! Use the ARROW KEYS to walk south out of the pen.";
+  } else if (gateNudges > 4) {
+    msg = pupName + " is trapped in the small-animal pen. " +
+          "The latch is right there — surely one of " + pupName + "'s " +
+          "actions can deal with it?";
+  } else {
+    msg = pupName + " is locked in the small-animal pen. " +
+          "Try Sniff, Dig, Bark, and Bite to find a way out.";
+  }
+
+  fill(255, 240, 210);
+  textAlign(LEFT, TOP);
+  textSize(11);
+  text(msg, bx + 12, by + 8, bw - 24, 38);
+
+  // Action key legend across the bottom of the bubble.
+  let cy = by + bh - 14;
+  let cx = bx + 14;
+  let step = (bw - 28) / 4;
+  drawKeyHint(cx + step * 0,     cy, "D", "Dig");
+  drawKeyHint(cx + step * 1,     cy, "B", "Bark");
+  drawKeyHint(cx + step * 2,     cy, "S", "Sniff");
+  drawKeyHint(cx + step * 3,     cy, "T", "Bite");
+}
+
+function drawKeyHint(x, y, k, label) {
+  push();
+  noStroke();
+  fill(255, 230, 130);
+  rect(x, y - 7, 14, 14, 2);
+  fill(40, 30, 20);
+  textAlign(CENTER, CENTER);
+  textSize(10);
+  text(k, x + 7, y);
+  fill(255, 255, 255, 220);
+  textAlign(LEFT, CENTER);
+  textSize(11);
+  text(": " + label, x + 16, y);
+  pop();
+}
+
+// ============================================================
+//  OVERWORLD
+// ============================================================
+function buildLandmarks() {
+  landmarks = [
+    { x: 17, y: 26, w: 6, h: 2, color: [120, 90, 60],   label: "Entrance Gate" },
+    { x: 3,  y: 20, w: 4, h: 3, color: [220, 100, 80],  label: "Corn Dog Stand" },
+    { x: 8,  y: 20, w: 4, h: 3, color: [240, 180, 60],  label: "Funnel Cakes" },
+    { x: 13, y: 20, w: 4, h: 3, color: [255, 130, 50],  label: "BBQ Pit" },
+    { x: 24, y: 20, w: 5, h: 3, color: [80, 180, 220],  label: "Ring Toss" },
+    { x: 30, y: 20, w: 5, h: 3, color: [100, 200, 140], label: "Balloon Darts" },
+    { x: 5,  y: 10, w: 6, h: 5, color: [180, 100, 220], label: "Ferris Wheel" },
+    { x: 14, y: 10, w: 5, h: 4, color: [220, 80, 150],  label: "Tilt-A-Whirl" },
+    { x: 22, y: 10, w: 6, h: 5, color: [100, 120, 220], label: "Bumper Cars" },
+    { x: 30, y: 10, w: 6, h: 5, color: [140, 180, 80],  label: "Petting Zoo" },
+    { x: 30, y: 5,  w: 6, h: 4, color: [180, 160, 100], label: "Horse Barn" },
+    { x: 5,  y: 3,  w: 8, h: 4, color: [200, 60, 60],   label: "Main Stage" },
+    { x: 16, y: 3,  w: 3, h: 2, color: [100, 100, 110], label: "Restrooms" },
+    { x: 22, y: 2,  w: 5, h: 3, color: [255, 220, 100], label: "Picnic Area" },
+  ];
+}
+
+function updateMap() {
+  moving = false;
+  let dx = 0, dy = 0;
+  if (keyIsDown(LEFT_ARROW))  { dx = -1; pup.dir = 1; }
+  if (keyIsDown(RIGHT_ARROW)) { dx =  1; pup.dir = 2; }
+  if (keyIsDown(UP_ARROW))    { dy = -1; pup.dir = 3; }
+  if (keyIsDown(DOWN_ARROW))  { dy =  1; pup.dir = 0; }
+
+  if (dx !== 0 || dy !== 0) {
+    moving = true;
+    if (dx !== 0 && dy !== 0) { dx *= 0.707; dy *= 0.707; }
+
+    let newX = pup.x + dx * pup.speed;
+    let newY = pup.y + dy * pup.speed;
+
     let pupLeft   = newX - 8;
     let pupRight  = newX + 8;
     let pupTop    = newY - 8;
@@ -270,66 +1587,44 @@ function updateMap() {
       pup.x = newX;
       pup.y = newY;
     }
-
     pup.frame += 0.15;
   }
 
-  // Camera follows pup
-  camX = pup.x - width / 2;
-  camY = pup.y - height / 2;
-  camX = constrain(camX, 0, MAP_W - width);
-  camY = constrain(camY, 0, MAP_H - height);
+  camX = constrain(pup.x - width / 2, 0, MAP_W - width);
+  camY = constrain(pup.y - height / 2, 0, MAP_H - height);
 }
 
-// ============================================================
-//  MAP DRAW
-// ============================================================
 function drawMap() {
-  // Ground
   background(90, 160, 70);
-
   push();
   translate(-camX, -camY);
 
-  // Ground texture (dirt paths)
   drawGroundPaths();
 
-  // Landmarks
   for (let lm of landmarks) {
     let lx = lm.x * TILE;
     let ly = lm.y * TILE;
     let lw = lm.w * TILE;
     let lh = lm.h * TILE;
-
-    // Shadow
     noStroke();
     fill(0, 0, 0, 40);
     rect(lx + 3, ly + 3, lw, lh, 4);
-
-    // Building
     fill(lm.color[0], lm.color[1], lm.color[2]);
     stroke(0, 0, 0, 60);
     strokeWeight(1);
     rect(lx, ly, lw, lh, 4);
-
-    // Roof stripe
     fill(lm.color[0] * 0.7, lm.color[1] * 0.7, lm.color[2] * 0.7);
     noStroke();
     rect(lx, ly, lw, 6, 4, 4, 0, 0);
-
-    // Label
     fill(255, 255, 255, 200);
-    noStroke();
     textAlign(CENTER, CENTER);
     textSize(9);
     text(lm.label, lx + lw / 2, ly + lh / 2);
   }
 
-  // Draw pup
   let bobble = moving ? sin(pup.frame * 4) * 2 : 0;
   drawPupSprite(pup.x, pup.y + bobble, 1.5, pup.dir, moving);
 
-  // Pup name tag
   noStroke();
   fill(255, 255, 255, 180);
   textAlign(CENTER, CENTER);
@@ -338,49 +1633,40 @@ function drawMap() {
 
   pop();
 
-  // HUD
   drawMapHUD();
 }
 
 function drawGroundPaths() {
-  // Horizontal main path
   noStroke();
   fill(180, 155, 120);
   rect(0, 18 * TILE, MAP_W, 2 * TILE);
-
-  // Vertical main path
   rect(19 * TILE, 0, 2 * TILE, MAP_H);
-
-  // Path borders (subtle)
   stroke(160, 135, 100);
   strokeWeight(1);
-  // Horizontal
   line(0, 18 * TILE, MAP_W, 18 * TILE);
   line(0, 20 * TILE, MAP_W, 20 * TILE);
-  // Vertical
   line(19 * TILE, 0, 19 * TILE, MAP_H);
   line(21 * TILE, 0, 21 * TILE, MAP_H);
 }
 
 function drawMapHUD() {
-  // Top bar
   noStroke();
-  fill(0, 0, 0, 120);
+  fill(0, 0, 0, 130);
   rect(0, 0, width, 28);
 
   fill(255, 230, 130);
   textAlign(LEFT, CENTER);
   textSize(13);
-  text("🐕 " + pupName, 10, 14);
+  text("LOST PUP — " + pupName, 10, 14);
 
   fill(200, 200, 220, 160);
   textAlign(RIGHT, CENTER);
   textSize(11);
-  text("ARROW KEYS / WASD to move", width - 10, 14);
+  text("ARROWS to move   D Dig · B Bark · S Sniff · T Bite", width - 10, 14);
 }
 
 // ============================================================
-//  PUP SPRITE (simple pixel-art style)
+//  PUP TOP-DOWN SPRITE (used in the paddock and on title)
 // ============================================================
 function drawPupSprite(x, y, scale, dir, isMoving) {
   push();
@@ -388,22 +1674,19 @@ function drawPupSprite(x, y, scale, dir, isMoving) {
 
   let s = scale;
 
-  // Body
   noStroke();
-  fill(180, 130, 70);  // brown dog
+  fill(180, 130, 70);
   ellipse(0, 0, 14 * s, 10 * s);
 
-  // Head
   let hx = 0, hy = -5 * s;
-  if (dir === 0) { hx = 0;  hy = 5 * s; }   // down
-  if (dir === 1) { hx = -6 * s; hy = 0; }    // left
-  if (dir === 2) { hx = 6 * s;  hy = 0; }    // right
-  if (dir === 3) { hx = 0;  hy = -5 * s; }   // up
+  if (dir === 0) { hx = 0;     hy = 5 * s; }
+  if (dir === 1) { hx = -6*s;  hy = 0; }
+  if (dir === 2) { hx = 6*s;   hy = 0; }
+  if (dir === 3) { hx = 0;     hy = -5 * s; }
 
   fill(200, 150, 80);
   ellipse(hx, hy, 10 * s, 9 * s);
 
-  // Ears
   fill(150, 100, 50);
   if (dir === 1 || dir === 3) {
     ellipse(hx - 4 * s, hy - 3 * s, 4 * s, 6 * s);
@@ -416,7 +1699,6 @@ function drawPupSprite(x, y, scale, dir, isMoving) {
     ellipse(hx + 4 * s, hy - 2 * s, 4 * s, 6 * s);
   }
 
-  // Eyes (not when facing away)
   if (dir !== 3) {
     fill(30, 30, 30);
     let eyeSpread = 2.5 * s;
@@ -430,19 +1712,12 @@ function drawPupSprite(x, y, scale, dir, isMoving) {
       ellipse(hx - eyeSpread, hy - 1 * s, 2 * s, 2.5 * s);
       ellipse(hx + eyeSpread, hy - 1 * s, 2 * s, 2.5 * s);
     }
-
-    // Nose
     fill(50, 30, 30);
-    if (dir === 0) {
-      ellipse(hx, hy + 2.5 * s, 2.5 * s, 2 * s);
-    } else if (dir === 1) {
-      ellipse(hx - 3.5 * s, hy + 1 * s, 2 * s, 1.5 * s);
-    } else if (dir === 2) {
-      ellipse(hx + 3.5 * s, hy + 1 * s, 2 * s, 1.5 * s);
-    }
+    if (dir === 0)      ellipse(hx, hy + 2.5 * s, 2.5 * s, 2 * s);
+    else if (dir === 1) ellipse(hx - 3.5 * s, hy + 1 * s, 2 * s, 1.5 * s);
+    else if (dir === 2) ellipse(hx + 3.5 * s, hy + 1 * s, 2 * s, 1.5 * s);
   }
 
-  // Tail
   noFill();
   stroke(180, 130, 70);
   strokeWeight(2 * s);
@@ -452,7 +1727,6 @@ function drawPupSprite(x, y, scale, dir, isMoving) {
     arc(tx, -2 * s, 6 * s, 8 * s, -HALF_PI + tailWag, HALF_PI + tailWag);
   }
 
-  // Legs (simple dots when walking)
   if (isMoving) {
     noStroke();
     fill(150, 100, 50);
@@ -470,19 +1744,54 @@ function drawPupSprite(x, y, scale, dir, isMoving) {
 function keyPressed() {
   if (gameState === STATE_TITLE) {
     if (keyCode === ENTER && pupName.length > 0) {
-      gameState = STATE_MAP;
+      gameState = STATE_STORY;
       typingName = false;
+      storyIndex = 0;
+      storyFrame = 0;
+      storyFade = 0;
       return;
     }
     if (keyCode === BACKSPACE) {
       pupName = pupName.slice(0, -1);
       return;
     }
-    // Allow letters, numbers, spaces
     if (key.length === 1 && pupName.length < 12) {
-      if (key.match(/[a-zA-Z0-9 ]/)) {
-        pupName += key;
+      if (key.match(/[a-zA-Z0-9 ]/)) pupName += key;
+    }
+    return;
+  }
+
+  if (gameState === STATE_STORY) {
+    if (keyCode === ENTER || key === ' ') {
+      if (storyIndex < STORY_BEATS - 1) {
+        storyIndex++;
+        storyFrame = 0;
+        storyFade = 0;
+      } else {
+        gameState = STATE_PADDOCK;
       }
+    }
+    return;
+  }
+
+  if (gameState === STATE_PADDOCK) {
+    // 68=D, 66=B, 83=S, 84=T
+    if      (keyCode === 68) doDig();
+    else if (keyCode === 66) doBark();
+    else if (keyCode === 83) doSniff();
+    else if (keyCode === 84) doBite();
+    return;
+  }
+}
+
+function mousePressed() {
+  if (gameState === STATE_STORY) {
+    if (storyIndex < STORY_BEATS - 1) {
+      storyIndex++;
+      storyFrame = 0;
+      storyFade = 0;
+    } else {
+      gameState = STATE_PADDOCK;
     }
   }
 }
