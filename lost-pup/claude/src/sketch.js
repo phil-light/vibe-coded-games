@@ -54,6 +54,120 @@ const MAP_W = MAP_COLS * TILE, MAP_H = MAP_ROWS * TILE;
 let camX = 0, camY = 0;
 let landmarks = [];
 
+// -- Puzzle 4: Sniff Trail --
+// Four "HOT" scent locations the family left behind. Sniffing within range
+// of any of them adds it to scentsFound; gathering all four fires a one-shot
+// recap message that confirms the destination.
+const SCENT_BREADCRUMBS = [
+  { id: "spawn",    tile: [33, 10] },
+  { id: "restroom", tile: [17,  6] },
+  { id: "picnic",   tile: [24,  3] },
+  { id: "ferris",   tile: [ 8, 14] },
+];
+const HOT_RADIUS_TILES  = 3;   // generous so the player isn't pixel-hunting
+const WARM_RADIUS_TILES = 6;   // ring around any breadcrumb that reads WARM
+let scentsFound  = new Set();
+let trailComplete = false;
+let recapShown   = false;
+
+// -- Crowd of fairgoers --
+// 150 NPCs scattered across the overworld, with denser clumps at food row,
+// the Main Stage, and the carnival games. They don't block movement; the
+// pup walks freely through them. They DO react to verbs: sniff one for a
+// "not my family" reading, bark for a 70/25/5 reaction (smile / back away /
+// summon Animal Control), bite for an instant catch, dig anywhere for a
+// 20% chance of finding dropped food.
+const PEOPLE_COUNT      = 150;
+const PERSON_REACH      = 26;   // pixels — close enough to interact with a person
+let people = [];
+
+const SKIN_TONES = [
+  [255, 230, 200], [240, 215, 180], [225, 195, 160], [205, 165, 130],
+  [180, 130,  95], [145, 100,  75], [110,  75,  55], [ 85,  55,  40],
+];
+
+const HAIR_COLORS = [
+  [ 30,  20,  15], [ 60,  35,  20], [ 95,  55,  30], [140,  85,  40],
+  [200, 170, 100], [240, 215, 130], [180,  60,  30], [200, 200, 205],
+  [ 60,  60,  70], [ 80,  50,  90],
+];
+
+const SHIRT_COLORS = [
+  [220,  80,  80], [220, 140,  80], [240, 200,  80], [180, 220,  80],
+  [ 80, 200, 120], [ 80, 200, 200], [ 80, 140, 220], [140,  80, 220],
+  [220,  80, 180], [240, 240, 240], [ 40,  40,  60], [200, 200, 200],
+  [180, 100,  60], [ 60, 120,  80], [120,  60,  80], [200, 220, 240],
+  [255, 165,  60], [120, 180, 220], [220, 180, 200],
+];
+
+const PANTS_COLORS = [
+  [ 40,  40,  60], [ 60,  40,  30], [ 80,  80,  90], [180, 140,  90],
+  [ 70,  90, 130], [110,  85,  60], [ 50,  60,  70],
+];
+
+// Crowd density centers — (tileX, tileY, weight). Higher weight = more people
+// spawn near here. Tuned so food row, Main Stage, and carnival games are
+// dense, while landmark-edge clumps (Petting Zoo, Horse Barn) are smaller.
+const CROWD_CENTERS = [
+  // Food row (south of the central east-west path)
+  { x:  5, y: 23, w: 14 }, { x: 10, y: 23, w: 14 }, { x: 15, y: 23, w: 14 },
+  // Main Stage front (south of the stage building)
+  { x:  9, y:  8, w: 18 }, { x:  9, y:  9, w: 10 },
+  // Carnival games south
+  { x: 26, y: 23, w:  8 }, { x: 32, y: 23, w:  8 },
+  // Rides
+  { x: 16, y: 14, w:  8 }, { x: 25, y: 14, w:  8 }, { x: 33, y: 14, w:  6 },
+  // Ferris Wheel queue
+  { x:  8, y: 16, w:  6 },
+  // Picnic & Restrooms
+  { x: 24, y:  6, w:  6 }, { x: 17, y:  7, w:  4 },
+  // Open paths spread thin
+  { x: 19, y: 19, w:  8 }, { x: 15, y: 19, w:  6 }, { x: 25, y: 19, w:  6 },
+  { x: 30, y: 19, w:  5 }, { x:  5, y: 19, w:  5 }, { x: 35, y: 19, w:  4 },
+  // Far corners — sparse
+  { x:  3, y: 27, w:  3 }, { x: 36, y: 27, w:  3 }, { x: 36, y:  3, w:  3 },
+  // Horse barn front (low — pup spawns here, don't pile people on it)
+  { x: 33, y: 12, w:  3 },
+];
+
+// Snippets of sniff flavor text for individual fairgoers. "Not my family"
+// is always prepended; this is just the trailing detail.
+const PERSON_FLAVORS = [
+  "smells like sunscreen and corn dogs.",
+  "smells like cinnamon roll glaze and motor oil.",
+  "smells like dryer sheets and worry.",
+  "smells like cat — three cats — and stale coffee.",
+  "smells like a different dog. A small one. Yappy.",
+  "smells like denim and roller-coaster fear-sweat.",
+  "smells like baby powder and maple syrup.",
+  "smells like aftershave with a faint pickle ghost.",
+  "smells like garlic fries and a recent argument.",
+  "smells like menthol gum and thirty kinds of body spray.",
+  "smells like a barn — but not the right one.",
+  "smells like a dad who has been holding a balloon for an hour.",
+  "smells like a kid who just ate cotton candy with both hands.",
+  "smells like a teenager pretending to be cool.",
+  "smells like funnel cake — but not the family's funnel cake.",
+  "smells like horse, lavender soap, and gum.",
+  "smells like sunscreen sprayed too aggressively.",
+  "smells like a vape pen and shame.",
+  "smells like leather wallet and parking-lot tar.",
+  "smells like wet wipes and cheap perfume.",
+  "smells like a wedding ring polished today.",
+  "smells like fresh grass-clippings on hiking boots.",
+  "smells like a tourist's brand-new sneakers.",
+  "smells like sunscreen and powdered sugar.",
+  "smells like a goldfish bag in a backpack somewhere.",
+  "smells like onion rings and triumph.",
+  "smells like rubber boots and hand sanitizer.",
+  "smells like cigarette smoke ten minutes old.",
+  "smells like a different family. They have a cat.",
+  "smells like a teenager who has lost his parents.",
+  "smells like nail polish and gummy bears.",
+  "smells like a science teacher on summer vacation.",
+  "smells like dishwasher steam and cologne.",
+];
+
 // ============================================================
 //  SETUP / DRAW
 // ============================================================
@@ -61,6 +175,7 @@ function setup() {
   createCanvas(640, 480);
   textFont("monospace");
   buildLandmarks();
+  seedPeople();
 }
 
 function draw() {
@@ -1548,7 +1663,504 @@ function buildLandmarks() {
   ];
 }
 
+// ---- Puzzle 4 helpers --------------------------------------------------
+function nearestBreadcrumb() {
+  let best = null;
+  let bestD = Infinity;
+  for (const c of SCENT_BREADCRUMBS) {
+    let cx = (c.tile[0] + 0.5) * TILE;
+    let cy = (c.tile[1] + 0.5) * TILE;
+    let d = dist(pup.x, pup.y, cx, cy);
+    if (d < bestD) { bestD = d; best = c; }
+  }
+  return { crumb: best, distance: bestD };
+}
+
+// Returns one of HOT / WARM / COOL / COLD for the pup's current tile.
+// HOT is anchored to the four scent-trail breadcrumbs. Everything else is
+// a coarse zone read so the verb stays useful as the player wanders.
+function scentBandHere() {
+  let { crumb, distance } = nearestBreadcrumb();
+  if (distance < HOT_RADIUS_TILES * TILE) {
+    return { band: "HOT", crumbId: crumb.id };
+  }
+  // WARM halo around every breadcrumb. Without this, the area immediately
+  // outside HOT range (e.g. just north/west of the Ferris Wheel) reads
+  // COLD, which is counter-intuitive for "right next to the family."
+  if (distance < WARM_RADIUS_TILES * TILE) {
+    return { band: "WARM" };
+  }
+
+  let pupTileX = pup.x / TILE;
+  let pupTileY = pup.y / TILE;
+
+  const FOOD_LABELS = ["Corn Dog Stand", "Funnel Cakes", "BBQ Pit"];
+  for (const lm of landmarks) {
+    if (FOOD_LABELS.includes(lm.label)) {
+      let lcx = lm.x + lm.w / 2;
+      let lcy = lm.y + lm.h / 2;
+      if (Math.abs(pupTileX - lcx) < 4 && Math.abs(pupTileY - lcy) < 4) {
+        return { band: "WARM" };
+      }
+    }
+  }
+
+  // Two main paths: horizontal at rows 18-19, vertical at cols 19-20.
+  if ((pupTileY >= 18 && pupTileY < 20) ||
+      (pupTileX >= 19 && pupTileX < 21)) {
+    return { band: "COOL" };
+  }
+
+  return { band: "COLD" };
+}
+
+function hotMessageFor(crumbId) {
+  switch (crumbId) {
+    case "spawn":
+      return pupName + " catches a HOT scent — leashes, nervous fingers, " +
+             "kid-sized sneakers. They were RIGHT HERE. Minutes ago.";
+    case "restroom":
+      return pupName + " catches a HOT scent — grease, buttered popcorn, " +
+             "the metal of a Ferris Wheel control lever. The family bought " +
+             "tickets from whoever this belongs to.";
+    case "picnic":
+      return pupName + " catches a HOT scent — Mom's lotion, kid's " +
+             "sticky-finger funnel cake, Dad's BBQ-sauce shirt. They were " +
+             "here, not long ago.";
+    case "ferris":
+      return pupName + " catches a HOT scent — funnel cake fingers and " +
+             "shoe rubber. They climbed in here. RIGHT HERE.";
+  }
+  return pupName + " catches a HOT scent of the family.";
+}
+
+function doOverworldSniff() {
+  // Priority: breadcrumbs override everything (the family smell is the loudest
+  // thing around). Then individual strangers. Then ambient zone.
+  let { band, crumbId } = scentBandHere();
+  if (band === "HOT") {
+    let wasNew = !scentsFound.has(crumbId);
+    if (wasNew) scentsFound.add(crumbId);
+
+    let msg = hotMessageFor(crumbId);
+    if (wasNew) {
+      msg += "  (Family scent " + scentsFound.size + " of " +
+             SCENT_BREADCRUMBS.length + " found.)";
+    }
+
+    // Reaching the Ferris Wheel ends the trail regardless of how many
+    // breadcrumbs were skipped — the dog has located the family. Also
+    // ends if all four breadcrumbs were collected the long way.
+    let endTrail = !trailComplete &&
+                   (crumbId === "ferris" ||
+                    scentsFound.size === SCENT_BREADCRUMBS.length);
+    if (endTrail) {
+      msg += "  " + pupName + "'s nose connects every smell — the " +
+             "trail is unmistakable. THEY'RE AT THE FERRIS WHEEL.";
+      recapShown   = true;
+      trailComplete = true;
+      // Mark any unsniffed breadcrumbs as found so the HUD reads
+      // "Trail: complete" and the recap doesn't refire.
+      for (const c of SCENT_BREADCRUMBS) scentsFound.add(c.id);
+    }
+    setActionMessage(msg, 420);
+    return;
+  }
+
+  let np = nearestPerson();
+  if (np && np.distance < PERSON_REACH) {
+    setActionMessage(
+      "Not my family. This one " + np.person.flavor, 280);
+    return;
+  }
+
+  // For all non-HOT bands, lead with the band name in caps so the player
+  // can tell at a glance what they got — matches the "HOT scent" wording.
+  let msg;
+  if (band === "WARM") {
+    msg = pupName + " catches a WARM scent — familiar. Funnel cake " +
+          "fingers. Getting close.";
+  } else if (band === "COOL") {
+    msg = pupName + " catches a COOL scent — a stranger's perfume. " +
+          "Nothing useful here.";
+  } else {
+    msg = pupName + " catches a COLD scent — just sun-warm dirt and " +
+          "somebody's spilled lemonade.";
+  }
+  setActionMessage(msg, 360);
+}
+
+function doOverworldBark() {
+  let np = nearestPerson();
+  if (np && np.distance < PERSON_REACH) {
+    let r = random();
+    if (r < 0.70) {
+      setActionMessage(
+        "Bark! The stranger smiles, crouches a little, and waves at " +
+        pupName + ".", 220);
+      np.person.reactTimer = 50;
+      np.person.reactKind  = "smile";
+    } else if (r < 0.95) {
+      setActionMessage(
+        "Bark! The stranger flinches and backs away, muttering about " +
+        "loose dogs.", 220);
+      np.person.reactTimer = 50;
+      np.person.reactKind  = "flinch";
+      // nudge them away from the pup
+      let dx = np.person.x - pup.x;
+      let dy = np.person.y - pup.y;
+      let d = Math.hypot(dx, dy) || 1;
+      np.person.targetX = np.person.x + (dx / d) * 60;
+      np.person.targetY = np.person.y + (dy / d) * 60;
+      np.person.repickTimer = 90;
+    } else {
+      returnToPaddock(
+        "BARK! The stranger shrieks, \"LOOSE DOG!\" — Animal Control " +
+        "scoops " + pupName + " up and dumps the pup back in the paddock.");
+    }
+    return;
+  }
+  setActionMessage(
+    pupName + "'s bark echoes off the booths. A few pigeons flap up — " +
+    "nothing else stirs.", 200);
+}
+
+function doOverworldBite() {
+  let np = nearestPerson();
+  if (np && np.distance < PERSON_REACH) {
+    returnToPaddock(
+      pupName + " nipped a stranger! They yelp for help and Animal " +
+      "Control hauls the pup back to the paddock.");
+    return;
+  }
+  setActionMessage(
+    pupName + " snaps at the air. Just air. Tastes like dust.", 200);
+}
+
+function doOverworldDig() {
+  if (random() < 0.20) {
+    let snack = random([
+      "half a corn dog", "a buttery popcorn kernel cluster",
+      "a torn-off hot dog end", "a pickle slice", "a forgotten french fry",
+      "a smear of funnel-cake powder on a napkin",
+      "a single, perfect cheese curd",
+    ]);
+    setActionMessage(
+      pupName + " digs and uncovers " + snack + " — *gulp* — gone in a " +
+      "single happy chomp.", 240);
+    return;
+  }
+  setActionMessage(
+    pupName + " kicks up a fast little dirt-spray. Just dirt, hay, and " +
+    "trampled grass.", 200);
+}
+
+// ---- People (crowd of fairgoers) ---------------------------------------
+function makePerson(x, y, opts) {
+  return {
+    x: x, y: y,
+    homeX: x, homeY: y,
+    skin:  opts.skin,
+    shirt: opts.shirt,
+    pants: opts.pants,
+    hair:  opts.hair,
+    hairStyle: opts.hairStyle,    // "short" | "long" | "hat" | "bald"
+    scale: opts.scale,             // ~0.6 kid, ~1.0 adult, ~1.15 large adult
+    holding: opts.holding,         // null | "balloon" | "food" | "prize"
+    holdingColor: opts.holdingColor,
+    behavior: opts.behavior,       // "idle" | "walk" | "run"
+    walkRadius: opts.walkRadius,
+    speed: opts.speed,
+    dir: 0,
+    familyId: opts.familyId || null,
+    flavor: opts.flavor,
+    t: random(TWO_PI),
+    targetX: x, targetY: y,
+    repickTimer: floor(random(30, 180)),
+    reactTimer: 0,
+    reactKind: null,
+  };
+}
+
+function weightedPick(arr) {
+  let total = 0;
+  for (const it of arr) total += it.w;
+  let r = random(total);
+  for (const it of arr) {
+    r -= it.w;
+    if (r <= 0) return it;
+  }
+  return arr[arr.length - 1];
+}
+
+// Push (x,y) out to the closest edge of any landmark it's inside, then
+// clamp to the map. Used so spawned people don't end up under a building.
+function avoidLandmark(x, y) {
+  for (const lm of landmarks) {
+    let lx = lm.x * TILE, ly = lm.y * TILE;
+    let lw = lm.w * TILE, lh = lm.h * TILE;
+    if (x > lx - 4 && x < lx + lw + 4 &&
+        y > ly - 4 && y < ly + lh + 4) {
+      let dl = x - (lx - 4);
+      let dr = (lx + lw + 4) - x;
+      let dt = y - (ly - 4);
+      let db = (ly + lh + 4) - y;
+      let m = min(dl, dr, dt, db);
+      if      (m === dl) x = lx - 6;
+      else if (m === dr) x = lx + lw + 6;
+      else if (m === dt) y = ly - 6;
+      else               y = ly + lh + 6;
+    }
+  }
+  x = constrain(x, 12, MAP_W - 12);
+  y = constrain(y, 12, MAP_H - 12);
+  return { x, y };
+}
+
+function pickHolding() {
+  let r = random();
+  if (r < 0.14) return "balloon";
+  if (r < 0.34) return "food";
+  if (r < 0.42) return "prize";
+  return null;
+}
+
+function pickBehavior() {
+  let r = random();
+  if (r < 0.08) return "run";
+  if (r < 0.40) return "idle";
+  return "walk";
+}
+
+function pickHairStyle() {
+  return random(["short", "short", "short", "long", "long", "hat", "bald"]);
+}
+
+function seedPeople() {
+  people = [];
+
+  // Family groups first — 18 of them, 2-4 members each. Members share a
+  // home position so they cluster, but each has their own appearance and
+  // wandering speed (so kids don't move in lockstep with parents).
+  let familyCount = 18;
+  for (let i = 0; i < familyCount; i++) {
+    let center = weightedPick(CROWD_CENTERS);
+    let baseX = center.x * TILE + random(-30, 30);
+    let baseY = center.y * TILE + random(-30, 30);
+    let placed = avoidLandmark(baseX, baseY);
+    let famId = "fam" + i;
+    let groupSize = 2 + floor(random(3));   // 2..4
+    for (let j = 0; j < groupSize; j++) {
+      let isKid = j >= 2 || (j === 1 && random() < 0.35);
+      let memberPos = avoidLandmark(
+        placed.x + random(-14, 14),
+        placed.y + random(-10, 10));
+      let person = makePerson(
+        memberPos.x, memberPos.y,
+        {
+          skin:  random(SKIN_TONES),
+          shirt: random(SHIRT_COLORS),
+          pants: random(PANTS_COLORS),
+          hair:  random(HAIR_COLORS),
+          hairStyle: pickHairStyle(),
+          scale: isKid ? random(0.55, 0.72) : random(0.95, 1.12),
+          holding: isKid && random() < 0.5 ? "balloon"
+                  : pickHolding(),
+          holdingColor: random(SHIRT_COLORS),
+          behavior: random(["idle", "walk"]),
+          walkRadius: 35,
+          speed: isKid ? random(0.35, 0.55) : random(0.20, 0.40),
+          familyId: famId,
+          flavor: random(PERSON_FLAVORS),
+        }
+      );
+      people.push(person);
+    }
+  }
+
+  // Fill out to PEOPLE_COUNT with individuals.
+  while (people.length < PEOPLE_COUNT) {
+    let center = weightedPick(CROWD_CENTERS);
+    let baseX = center.x * TILE + random(-50, 50);
+    let baseY = center.y * TILE + random(-50, 50);
+    let placed = avoidLandmark(baseX, baseY);
+    let isKid = random() < 0.18;
+    let behavior = pickBehavior();
+    let runner = behavior === "run";
+    people.push(makePerson(placed.x, placed.y, {
+      skin:  random(SKIN_TONES),
+      shirt: random(SHIRT_COLORS),
+      pants: random(PANTS_COLORS),
+      hair:  random(HAIR_COLORS),
+      hairStyle: pickHairStyle(),
+      scale: isKid ? random(0.55, 0.72) : random(0.92, 1.18),
+      holding: pickHolding(),
+      holdingColor: random(SHIRT_COLORS),
+      behavior: behavior,
+      walkRadius: runner ? 90 : 50,
+      speed: runner ? random(0.7, 1.1) : random(0.18, 0.45),
+      flavor: random(PERSON_FLAVORS),
+    }));
+  }
+}
+
+function updatePerson(p) {
+  // Per-person animation phase advances at slightly different rates so a
+  // crowd never marches in sync.
+  p.t += 0.04;
+  if (p.reactTimer > 0) p.reactTimer--;
+
+  p.repickTimer--;
+  if (p.repickTimer <= 0) {
+    p.repickTimer = floor(random(60, 240));
+    let r = p.walkRadius;
+    let target = avoidLandmark(
+      p.homeX + random(-r, r),
+      p.homeY + random(-r, r));
+    p.targetX = target.x;
+    p.targetY = target.y;
+  }
+
+  // Idlers don't actually walk — they shuffle in place a little.
+  if (p.behavior === "idle" && p.reactKind !== "flinch") return;
+
+  let dx = p.targetX - p.x;
+  let dy = p.targetY - p.y;
+  let d = Math.hypot(dx, dy);
+  if (d > 0.6) {
+    let speed = p.speed;
+    if (p.behavior === "run") speed = p.speed;
+    p.x += (dx / d) * speed;
+    p.y += (dy / d) * speed;
+    if (Math.abs(dx) > Math.abs(dy)) p.dir = dx > 0 ? 2 : 1;
+    else                              p.dir = dy > 0 ? 0 : 3;
+  }
+}
+
+function drawPersonMap(p) {
+  push();
+  translate(p.x, p.y);
+  let s = p.scale;
+
+  let walking = p.behavior === "walk" ||
+                (p.behavior === "idle" && p.reactKind === "flinch");
+  let running = p.behavior === "run";
+  let cycleSpeed = running ? 7 : (walking ? 4 : 1);
+  let stepF = (walking || running) ? sin(p.t * cycleSpeed) * 1.7 * s : 0;
+  let bob   = (walking || running) ? Math.abs(sin(p.t * cycleSpeed)) * 0.8 * s : 0;
+  let bodyY = -bob;
+
+  noStroke();
+  // Shadow
+  fill(0, 0, 0, 70);
+  ellipse(0, 12 * s, 13 * s, 4 * s);
+
+  // Legs (visible below the shirt)
+  fill(p.pants[0], p.pants[1], p.pants[2]);
+  rect(-2.6 * s, 5 * s, 2 * s, 7 * s + stepF, 1);
+  rect( 0.6 * s, 5 * s, 2 * s, 7 * s - stepF, 1);
+
+  // Body (shirt)
+  fill(p.shirt[0], p.shirt[1], p.shirt[2]);
+  rect(-4 * s, -3 * s + bodyY, 8 * s, 9 * s, 2);
+
+  // Arms (skin-colored, swing slightly with walk)
+  let armSwing = (walking || running) ? sin(p.t * cycleSpeed) * 1.0 * s : 0;
+  fill(p.skin[0], p.skin[1], p.skin[2]);
+  rect(-5.8 * s, -2 * s + bodyY + armSwing, 1.8 * s, 7 * s, 1);
+  rect( 4.0 * s, -2 * s + bodyY - armSwing, 1.8 * s, 7 * s, 1);
+
+  // Head
+  fill(p.skin[0], p.skin[1], p.skin[2]);
+  ellipse(0, -8 * s + bodyY, 7 * s, 8 * s);
+
+  // Hair / hat
+  if (p.hairStyle === "hat") {
+    fill(p.hair[0], p.hair[1], p.hair[2]);
+    arc(0, -10 * s + bodyY, 7.6 * s, 6 * s, PI, TWO_PI);
+    rect(-1 * s, -10 * s + bodyY, 6 * s, 1.6 * s);
+  } else if (p.hairStyle === "long") {
+    fill(p.hair[0], p.hair[1], p.hair[2]);
+    arc(0, -10 * s + bodyY, 7.6 * s, 7 * s, PI - 0.3, TWO_PI + 0.3);
+    rect(-3.8 * s, -9 * s + bodyY, 7.6 * s, 6 * s, 2);
+  } else if (p.hairStyle === "bald") {
+    // skip
+  } else {
+    fill(p.hair[0], p.hair[1], p.hair[2]);
+    arc(0, -10 * s + bodyY, 7.4 * s, 6 * s, PI, TWO_PI);
+  }
+
+  // Eyes — directional, tiny
+  fill(20);
+  let eyeY = -8 * s + bodyY;
+  if      (p.dir === 0) { ellipse(-1.6 * s, eyeY, 1.2, 1.4); ellipse(1.6 * s, eyeY, 1.2, 1.4); }
+  else if (p.dir === 1) { ellipse(-2.2 * s, eyeY, 1.2, 1.4); }
+  else if (p.dir === 2) { ellipse( 2.2 * s, eyeY, 1.2, 1.4); }
+  // dir 3 (facing away): no eyes drawn
+
+  // Held item — drawn on the right hand. Single push/pop so it sits
+  // cleanly on top of this person and never on top of a neighbor.
+  if (p.holding === "balloon") {
+    stroke(40, 40, 50, 180);
+    strokeWeight(0.8);
+    noFill();
+    line(5.5 * s, 0 * s + bodyY, 8 * s, -22 * s + bodyY);
+    noStroke();
+    fill(p.holdingColor[0], p.holdingColor[1], p.holdingColor[2]);
+    ellipse(8 * s, -26 * s + bodyY, 9 * s, 11 * s);
+    fill(255, 255, 255, 110);
+    ellipse(6.5 * s, -28 * s + bodyY, 2.2 * s, 1.4 * s);
+  } else if (p.holding === "food") {
+    fill(220, 180, 100);
+    rect(3.5 * s, 0 * s + bodyY, 5 * s, 4 * s, 1);
+    fill(255, 255, 255, 220);
+    ellipse(6 * s, 1 * s + bodyY, 4 * s, 1.5 * s);
+  } else if (p.holding === "prize") {
+    let pc = p.holdingColor;
+    fill(pc[0], pc[1], pc[2]);
+    ellipse(5.5 * s, 1 * s + bodyY, 6 * s, 7 * s);
+    ellipse(5.5 * s, -2.5 * s + bodyY, 5 * s, 5 * s);
+    fill(20);
+    ellipse(4.6 * s, -2.8 * s + bodyY, 0.9 * s, 0.9 * s);
+    ellipse(6.4 * s, -2.8 * s + bodyY, 0.9 * s, 0.9 * s);
+  }
+
+  // Reaction marks (smile/flinch) — small, fade with reactTimer.
+  if (p.reactTimer > 0) {
+    let a = constrain(p.reactTimer / 50, 0, 1);
+    fill(255, 240, 80, 220 * a);
+    textAlign(CENTER, CENTER);
+    textSize(10);
+    if      (p.reactKind === "smile")  text("♥", 0, -16 * s + bodyY);
+    else if (p.reactKind === "flinch") text("!",      0, -16 * s + bodyY);
+  }
+
+  pop();
+}
+
+function nearestPerson() {
+  let best = null;
+  let bestD = Infinity;
+  for (const p of people) {
+    let d = dist(p.x, p.y, pup.x, pup.y);
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  if (!best) return null;
+  return { person: best, distance: bestD };
+}
+
+function returnToPaddock(reason) {
+  gameState = STATE_PADDOCK;
+  pup.x = PAD_X + PAD_W / 2;
+  pup.y = PAD_Y + PAD_H / 2 + 10;
+  pup.dir = 0;
+  setActionMessage(reason, 360);
+}
+
 function updateMap() {
+  if (actionMessageTimer > 0) actionMessageTimer--;
+  for (const p of people) updatePerson(p);
+
   moving = false;
   let dx = 0, dy = 0;
   if (keyIsDown(LEFT_ARROW))  { dx = -1; pup.dir = 1; }
@@ -1622,18 +2234,39 @@ function drawMap() {
     text(lm.label, lx + lw / 2, ly + lh / 2);
   }
 
+  // Y-sorted entity layer. Each entity (pup or person) is drawn as one
+  // complete unit (its own push/pop), and entities are sorted by foot Y
+  // so a person standing further south properly draws on top of one
+  // standing north of them — no head/arm bleed across NPCs.
   let bobble = moving ? sin(pup.frame * 4) * 2 : 0;
-  drawPupSprite(pup.x, pup.y + bobble, 1.5, pup.dir, moving);
-
-  noStroke();
-  fill(255, 255, 255, 180);
-  textAlign(CENTER, CENTER);
-  textSize(10);
-  text(pupName, pup.x, pup.y - 20);
+  let entities = [];
+  for (const p of people) {
+    if (!isOnScreen(p.x, p.y, 40)) continue;     // simple frustum cull
+    entities.push({ y: p.y, kind: "person", p: p });
+  }
+  entities.push({ y: pup.y, kind: "pup", bobble: bobble });
+  entities.sort((a, b) => a.y - b.y);
+  for (const e of entities) {
+    if (e.kind === "person") {
+      drawPersonMap(e.p);
+    } else {
+      drawPupSprite(pup.x, pup.y + e.bobble, 1.5, pup.dir, moving);
+      noStroke();
+      fill(255, 255, 255, 180);
+      textAlign(CENTER, CENTER);
+      textSize(10);
+      text(pupName, pup.x, pup.y - 20);
+    }
+  }
 
   pop();
 
   drawMapHUD();
+}
+
+function isOnScreen(x, y, margin) {
+  return x > camX - margin && x < camX + width + margin &&
+         y > camY - margin && y < camY + height + margin;
 }
 
 function drawGroundPaths() {
@@ -1650,6 +2283,7 @@ function drawGroundPaths() {
 }
 
 function drawMapHUD() {
+  // Top bar
   noStroke();
   fill(0, 0, 0, 130);
   rect(0, 0, width, 28);
@@ -1659,10 +2293,61 @@ function drawMapHUD() {
   textSize(13);
   text("LOST PUP — " + pupName, 10, 14);
 
-  fill(200, 200, 220, 160);
+  // Trail progress: rendered in two colors so the progress half pops.
+  // ARROWS hint sits dim on the left; TRAIL count sits bright on the right.
+  let trailLabel = trailComplete
+    ? "TRAIL COMPLETE!"
+    : "TRAIL: " + scentsFound.size + " / " + SCENT_BREADCRUMBS.length;
+
   textAlign(RIGHT, CENTER);
+  textSize(13);
+  fill(255, 230, 130);
+  text(trailLabel, width - 10, 14);
+
+  let trailW = textWidth(trailLabel);
   textSize(11);
-  text("ARROWS to move   D Dig · B Bark · S Sniff · T Bite", width - 10, 14);
+  fill(200, 200, 220, 160);
+  text("ARROWS to move", width - 10 - trailW - 14, 14);
+
+  // Bottom info bubble (matches the paddock HUD).
+  let bx = 16, bw = width - 32;
+  let bh = 70, by = height - bh - 8;
+
+  noStroke();
+  fill(0, 0, 0, 165);
+  rect(bx, by, bw, bh, 6);
+  noFill();
+  stroke(255, 230, 130, 120);
+  strokeWeight(1);
+  rect(bx, by, bw, bh, 6);
+  noStroke();
+
+  let msg;
+  if (actionMessageTimer > 0) {
+    msg = actionMessage;
+  } else if (trailComplete) {
+    msg = pupName + " knows the family is at the Ferris Wheel.";
+  } else if (scentsFound.size === 0) {
+    msg = pupName + " is loose in the fairgrounds. Sniff the air to " +
+          "pick up the family's trail.";
+  } else {
+    msg = pupName + " has caught " + scentsFound.size + " of " +
+          SCENT_BREADCRUMBS.length + " scents so far. Keep sniffing — " +
+          "the trail leads somewhere.";
+  }
+
+  fill(255, 240, 210);
+  textAlign(LEFT, TOP);
+  textSize(11);
+  text(msg, bx + 12, by + 8, bw - 24, 38);
+
+  let cy = by + bh - 14;
+  let cx = bx + 14;
+  let step = (bw - 28) / 4;
+  drawKeyHint(cx + step * 0, cy, "D", "Dig");
+  drawKeyHint(cx + step * 1, cy, "B", "Bark");
+  drawKeyHint(cx + step * 2, cy, "S", "Sniff");
+  drawKeyHint(cx + step * 3, cy, "T", "Bite");
 }
 
 // ============================================================
@@ -1780,6 +2465,14 @@ function keyPressed() {
     else if (keyCode === 66) doBark();
     else if (keyCode === 83) doSniff();
     else if (keyCode === 84) doBite();
+    return;
+  }
+
+  if (gameState === STATE_MAP) {
+    if      (keyCode === 68) doOverworldDig();
+    else if (keyCode === 66) doOverworldBark();
+    else if (keyCode === 83) doOverworldSniff();
+    else if (keyCode === 84) doOverworldBite();
     return;
   }
 }
