@@ -151,3 +151,109 @@ Paste the updated `claude/src/sketch.js` into the p5.js web editor.
 5. Returning to the bench post-solve: bench is empty, sniff message
    adapts ("The same smell as the man now in the operator booth"),
    and dig falls through to the normal food-finding behavior.
+
+## Prompts
+
+### Prompt 2
+
+> this is a good start, but we need:
+>
+> 1. more of an explanation of why Tito is on the bench when we first
+>    see him after leaving the Paddock. The player doesn't know the
+>    story at that point. Let's keep the bench empty until player
+>    visits the Ferris wheel and discovers that the operator is missing.
+> 2. The player's first message upon finding Tito is that "Bark and
+>    bite haven't worked." This is before the player actually tests
+>    those actions.
+
+## Response — Discovery gating + honest HUD
+
+Two changes, both narrative-fidelity fixes rather than mechanics
+changes. The puzzle solution is unchanged: dig the dust patch under
+the bench. What changes is *when* the bench has anyone on it and
+*what* the HUD claims the player has tried.
+
+### What changed in `sketch.js`
+
+1. **New state**:
+
+   ```js
+   let operatorMissingDiscovered = false;
+   let titoBarkTried = false;
+   let titoBiteTried = false;
+   ```
+
+   `operatorMissingDiscovered` gates Tito's appearance on the bench;
+   the two `tried` flags let the HUD nudge reference only the verbs
+   the player has actually used.
+
+2. **`checkOperatorDiscovery()`**, called every frame from `updateMap()`.
+   Proximity check: when the pup gets within `OPERATOR_DISCOVERY_RADIUS`
+   (96 px) of the empty operator booth, fire a one-shot action message:
+
+   > "The Ferris Wheel sits unmoving. The operator's booth is empty —
+   > and somewhere up at the top of the wheel, the family is stuck.
+   > Wherever the operator went, the wheel can't run without him.
+   > {pup} had better find him."
+
+   That gives the player a story-anchored reason to go looking for an
+   operator on a bench, which is the question the original Prompt 1
+   implementation didn't answer.
+
+3. **Conditional Tito rendering**. In `drawMap()`'s entity layer, the
+   sleeping Tito sprite is only pushed when
+   `operatorMissingDiscovered === true` (or when he's already past the
+   `asleep` state). The bench is still drawn always — it's a real
+   piece of fair furniture — but it sits empty before discovery. The
+   snore-z particles are gated the same way.
+
+4. **Verb gating at the bench**. `doOverworldBark`, `doOverworldBite`,
+   and `doOverworldDig` now require `operatorMissingDiscovered` before
+   their bench-specific overrides fire. Pre-discovery, all three fall
+   through to their normal global behaviors (echo, air, dirt-spray /
+   food-find). This avoids the contradiction where the player could
+   "wake an invisible person."
+
+5. **`titoBarkTried` / `titoBiteTried`** are set true the first time
+   each verb's bench override runs.
+
+6. **HUD bench nudge** in `drawMapHUD()` now branches on the tried
+   flags. Priority order:
+
+   - both tried → "Bark and bite haven't done much. What else could
+     {pup} try?"
+   - only bark → "Barking didn't do it. What else could {pup} try?"
+   - only bite → "Biting didn't do it. What else could {pup} try?"
+   - neither → "A man in an operator's vest is fast asleep on the
+     bench. What does {pup} do?"
+
+   The nudge also no longer fires before discovery — there's nothing
+   to nudge about yet.
+
+7. **Sniff tail at the restroom breadcrumb** is now also gated on
+   discovery. Pre-discovery, sniffing at the bench (or anywhere in
+   the breadcrumb's HOT zone) returns the operator-smell message
+   without naming or locating a person. Once the booth has been
+   found, the tail names where Tito currently is (asleep on the
+   bench / hurrying west / in the booth). This means the breadcrumb
+   still gets sniffed as an early step of Puzzle 4 without leaking
+   "go find a sleeping man" before the player has any reason to
+   look for one.
+
+### Updated test recipe
+
+1. Title → name → story → paddock → escape paddock.
+2. Walk to the bench south of the Restrooms *first*. Bench is empty.
+   Bark / bite / dig all return their normal global flavor. Sniff
+   returns the restroom HOT message but with no tail naming a
+   person.
+3. Walk west along the central path or down through the rides until
+   the pup is within ~96 px of the operator booth east of the Ferris
+   Wheel. The discovery message fires once.
+4. Walk back to the bench. Tito is now snoring on it.
+   - **S** — the sniff tail now reads "The man on the bench. He's
+     out cold."
+   - **B** — bark; HUD nudge afterward reads "Barking didn't do it…"
+   - **T** — bite; HUD nudge afterward reads "Bark and bite haven't
+     done much…"
+   - **D** — solves the puzzle as before.

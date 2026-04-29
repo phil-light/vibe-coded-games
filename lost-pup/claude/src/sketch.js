@@ -104,6 +104,17 @@ let titoY         = TITO_BENCH_PY;
 let titoWakeFrame = 0;
 let titoWaypoint  = 0;         // index into TITO_PATH_TILES
 let wheelAngle    = 0;         // radians; ticks while wheelTurning
+// Until the player visits the Ferris Wheel and notices the booth is empty,
+// the operator simply isn't on the bench — the player has no in-fiction
+// reason to be looking for him yet. Discovery flips this flag and from
+// then on Tito is drawn snoring, sniff names him, and bark/bite/dig at the
+// bench all become meaningful interactions.
+let operatorMissingDiscovered = false;
+// Tracks which verbs the player has actually tried at the bench, so the
+// HUD nudge can reference them honestly instead of accusing the player of
+// failed attempts they never made.
+let titoBarkTried = false;
+let titoBiteTried = false;
 
 // -- Crowd of fairgoers --
 // 150 NPCs scattered across the overworld, with denser clumps at food row,
@@ -1755,11 +1766,18 @@ function hotMessageFor(crumbId) {
       return pupName + " catches a HOT scent — leashes, nervous fingers, " +
              "kid-sized sneakers. They were RIGHT HERE. Minutes ago.";
     case "restroom": {
-      let titoTail = titoState === "asleep"
-        ? " The man on the bench. He's out cold."
-        : (titoState === "atBooth"
-            ? " The same smell as the man now in the operator booth."
-            : " The man hurrying west toward the Ferris Wheel.");
+      // Pre-discovery, the player has no in-fiction reason to connect this
+      // smell to a specific person yet — leave the tail off and let them
+      // wonder. Once the empty booth has been found, the tail names where
+      // that person is right now.
+      let titoTail = "";
+      if (titoState === "atBooth") {
+        titoTail = " The same smell as the man now in the operator booth.";
+      } else if (titoState === "walking") {
+        titoTail = " The man hurrying west toward the Ferris Wheel.";
+      } else if (operatorMissingDiscovered) {
+        titoTail = " The man on the bench. He's out cold.";
+      }
       return pupName + " catches a HOT scent — grease, buttered popcorn, " +
              "the metal of a Ferris Wheel control lever. The family bought " +
              "tickets from whoever this belongs to." + titoTail;
@@ -1832,7 +1850,9 @@ function doOverworldSniff() {
 }
 
 function doOverworldBark() {
-  if (pupNearTitoBench() && titoState === "asleep") {
+  if (pupNearTitoBench() && titoState === "asleep" &&
+      operatorMissingDiscovered) {
+    titoBarkTried = true;
     setActionMessage(
       "BARK! Tito's snore hitches — then resumes, louder. He just rolls " +
       "over. He worked a double shift; this is a deep sleep.", 280);
@@ -1873,7 +1893,9 @@ function doOverworldBark() {
 }
 
 function doOverworldBite() {
-  if (pupNearTitoBench() && titoState === "asleep") {
+  if (pupNearTitoBench() && titoState === "asleep" &&
+      operatorMissingDiscovered) {
+    titoBiteTried = true;
     setActionMessage(
       pupName + " gnaws Tito's shoelaces apart. He mumbles something about " +
       "a knot, smacks his lips, and snores on. Cute — but he isn't waking up.",
@@ -1892,7 +1914,8 @@ function doOverworldBite() {
 }
 
 function doOverworldDig() {
-  if (pupNearTitoBench() && titoState === "asleep") {
+  if (pupNearTitoBench() && titoState === "asleep" &&
+      operatorMissingDiscovered) {
     titoState = "waking";
     titoWakeFrame = 0;
     titoAwake = true;
@@ -2219,6 +2242,26 @@ function pupNearTitoBench() {
   return dist(pup.x, pup.y, TITO_BENCH_PX, TITO_BENCH_PY) < TITO_REACH;
 }
 
+// Discovery: when the pup gets close to the empty operator booth at the
+// Ferris Wheel, fire a one-shot message that points the player back toward
+// finding the operator. Until this fires the bench south of the Restrooms
+// just looks like a bench — there's no Tito on it yet (in-fiction the
+// player isn't yet looking for him).
+const OPERATOR_DISCOVERY_RADIUS = 96;
+function checkOperatorDiscovery() {
+  if (operatorMissingDiscovered) return;
+  if (titoState !== "asleep") return; // safety: he's already moving anyway
+  let d = dist(pup.x, pup.y, FERRIS_BOOTH_PX, FERRIS_BOOTH_PY);
+  if (d < OPERATOR_DISCOVERY_RADIUS) {
+    operatorMissingDiscovered = true;
+    setActionMessage(
+      "The Ferris Wheel sits unmoving. The operator's booth is empty — " +
+      "and somewhere up at the top of the wheel, the family is stuck. " +
+      "Wherever the operator went, the wheel can't run without him. " +
+      pupName + " had better find him.", 540);
+  }
+}
+
 function updateTito() {
   if (titoState === "asleep" || titoState === "atBooth") return;
 
@@ -2497,6 +2540,7 @@ function updateMap() {
   if (actionMessageTimer > 0) actionMessageTimer--;
   for (const p of people) updatePerson(p);
   updateTito();
+  checkOperatorDiscovery();
   if (wheelTurning) wheelAngle += 0.02;
 
   moving = false;
@@ -2587,8 +2631,11 @@ function drawMap() {
   // both behind it and in front of it correctly.
   entities.push({ y: TITO_BENCH_PY + 14, kind: "bench" });
   // Tito himself, in his current pose. He's only worth drawing if he isn't
-  // off in the booth (drawn separately, below the wheel).
-  if (titoState !== "atBooth") {
+  // off in the booth (drawn separately, below the wheel) — and, while he's
+  // still asleep, only after the player has discovered the booth is empty.
+  let titoVisible = titoState !== "atBooth" &&
+                    !(titoState === "asleep" && !operatorMissingDiscovered);
+  if (titoVisible) {
     entities.push({ y: titoY + 14, kind: "tito" });
   }
   // Operator booth — drawn as part of the layer so the wheel-area visuals
@@ -2600,7 +2647,9 @@ function drawMap() {
       drawPersonMap(e.p);
     } else if (e.kind === "bench") {
       drawTitoBench(TITO_BENCH_PX, TITO_BENCH_PY);
-      if (titoState === "asleep") drawSleepZ(TITO_BENCH_PX, TITO_BENCH_PY);
+      if (titoState === "asleep" && operatorMissingDiscovered) {
+        drawSleepZ(TITO_BENCH_PX, TITO_BENCH_PY);
+      }
     } else if (e.kind === "tito") {
       if (titoState === "asleep") {
         drawSleepingTito(titoX, titoY);
@@ -2712,10 +2761,22 @@ function drawMapHUD() {
           "the Ferris Wheel.";
   } else if (titoAtBooth) {
     msg = "Tito's back in the booth. The Ferris Wheel is turning again.";
-  } else if (pupNearTitoBench() && titoState === "asleep") {
-    msg = "A man in an operator's vest is fast asleep on the bench. " +
-          "Bark and bite haven't done much. What else could " + pupName +
-          " try?";
+  } else if (pupNearTitoBench() && titoState === "asleep" &&
+             operatorMissingDiscovered) {
+    if (titoBarkTried && titoBiteTried) {
+      msg = "A man in an operator's vest is fast asleep on the bench. " +
+            "Bark and bite haven't done much. What else could " + pupName +
+            " try?";
+    } else if (titoBarkTried) {
+      msg = "A man in an operator's vest is fast asleep on the bench. " +
+            "Barking didn't do it. What else could " + pupName + " try?";
+    } else if (titoBiteTried) {
+      msg = "A man in an operator's vest is fast asleep on the bench. " +
+            "Biting didn't do it. What else could " + pupName + " try?";
+    } else {
+      msg = "A man in an operator's vest is fast asleep on the bench. " +
+            "What does " + pupName + " do?";
+    }
   } else if (trailComplete) {
     msg = pupName + " knows the family is at the Ferris Wheel.";
   } else if (scentsFound.size === 0) {
