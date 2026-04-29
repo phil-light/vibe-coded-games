@@ -70,6 +70,41 @@ let scentsFound  = new Set();
 let trailComplete = false;
 let recapShown   = false;
 
+// -- Puzzle 3: Wake Up Tito --
+// Tito the Ferris Wheel operator is asleep on a bench tucked south of the
+// Restrooms. Digging a dust patch under the bench sneezes him awake; he
+// then walks (visibly, along a fixed waypoint path) to the operator booth
+// next to the Ferris Wheel and starts the wheel turning. None of the other
+// verbs solve the puzzle — bark just makes him snore louder, bite unties
+// his shoelaces. State persists for the rest of the game.
+const TITO_BENCH_TILE = [17, 6];     // tile center of the bench
+const TITO_BENCH_PX   = (TITO_BENCH_TILE[0] + 0.5) * TILE;
+const TITO_BENCH_PY   = (TITO_BENCH_TILE[1] + 0.5) * TILE;
+const TITO_REACH      = 36;          // pixels — pup must be this close to interact
+const FERRIS_BOOTH_TILE = [11.5, 13.5]; // east edge of the Ferris Wheel landmark
+const FERRIS_BOOTH_PX = FERRIS_BOOTH_TILE[0] * TILE;
+const FERRIS_BOOTH_PY = FERRIS_BOOTH_TILE[1] * TILE;
+// Visible path Tito walks: south off the bench, onto the central east-west
+// path, west along it, then north to his booth. Tile coords; converted to
+// pixels at runtime.
+const TITO_PATH_TILES = [
+  [17.5,  7.0],
+  [17.5, 18.5],
+  [11.5, 18.5],
+  [11.5, 13.5],
+];
+const TITO_WAKE_FRAMES = 90;   // sneeze beat before he stands up
+const TITO_WALK_SPEED  = 1.6;  // pixels/frame on his march to the booth
+let titoAwake     = false;
+let titoAtBooth   = false;
+let wheelTurning  = false;
+let titoState     = "asleep";  // "asleep" | "waking" | "walking" | "atBooth"
+let titoX         = TITO_BENCH_PX;
+let titoY         = TITO_BENCH_PY;
+let titoWakeFrame = 0;
+let titoWaypoint  = 0;         // index into TITO_PATH_TILES
+let wheelAngle    = 0;         // radians; ticks while wheelTurning
+
 // -- Crowd of fairgoers --
 // 150 NPCs scattered across the overworld, with denser clumps at food row,
 // the Main Stage, and the carnival games. They don't block movement; the
@@ -1719,10 +1754,16 @@ function hotMessageFor(crumbId) {
     case "spawn":
       return pupName + " catches a HOT scent — leashes, nervous fingers, " +
              "kid-sized sneakers. They were RIGHT HERE. Minutes ago.";
-    case "restroom":
+    case "restroom": {
+      let titoTail = titoState === "asleep"
+        ? " The man on the bench. He's out cold."
+        : (titoState === "atBooth"
+            ? " The same smell as the man now in the operator booth."
+            : " The man hurrying west toward the Ferris Wheel.");
       return pupName + " catches a HOT scent — grease, buttered popcorn, " +
              "the metal of a Ferris Wheel control lever. The family bought " +
-             "tickets from whoever this belongs to.";
+             "tickets from whoever this belongs to." + titoTail;
+    }
     case "picnic":
       return pupName + " catches a HOT scent — Mom's lotion, kid's " +
              "sticky-finger funnel cake, Dad's BBQ-sauce shirt. They were " +
@@ -1791,6 +1832,12 @@ function doOverworldSniff() {
 }
 
 function doOverworldBark() {
+  if (pupNearTitoBench() && titoState === "asleep") {
+    setActionMessage(
+      "BARK! Tito's snore hitches — then resumes, louder. He just rolls " +
+      "over. He worked a double shift; this is a deep sleep.", 280);
+    return;
+  }
   let np = nearestPerson();
   if (np && np.distance < PERSON_REACH) {
     let r = random();
@@ -1826,6 +1873,13 @@ function doOverworldBark() {
 }
 
 function doOverworldBite() {
+  if (pupNearTitoBench() && titoState === "asleep") {
+    setActionMessage(
+      pupName + " gnaws Tito's shoelaces apart. He mumbles something about " +
+      "a knot, smacks his lips, and snores on. Cute — but he isn't waking up.",
+      280);
+    return;
+  }
   let np = nearestPerson();
   if (np && np.distance < PERSON_REACH) {
     returnToPaddock(
@@ -1838,6 +1892,17 @@ function doOverworldBite() {
 }
 
 function doOverworldDig() {
+  if (pupNearTitoBench() && titoState === "asleep") {
+    titoState = "waking";
+    titoWakeFrame = 0;
+    titoAwake = true;
+    setActionMessage(
+      pupName + " digs the dust patch under the bench. A puff of fine, dry " +
+      "dust kicks up straight into Tito's face. *AH-CHOO! AH-CHOO! AH-CHOO!* " +
+      "\"AAAH! THE WHEEL! THE WHEEL!\" He bolts off the bench toward the " +
+      "Ferris Wheel.", 540);
+    return;
+  }
   if (random() < 0.20) {
     let snack = random([
       "half a corn dog", "a buttery popcorn kernel cluster",
@@ -2149,6 +2214,277 @@ function nearestPerson() {
   return { person: best, distance: bestD };
 }
 
+// ---- Puzzle 3 helpers --------------------------------------------------
+function pupNearTitoBench() {
+  return dist(pup.x, pup.y, TITO_BENCH_PX, TITO_BENCH_PY) < TITO_REACH;
+}
+
+function updateTito() {
+  if (titoState === "asleep" || titoState === "atBooth") return;
+
+  if (titoState === "waking") {
+    titoWakeFrame++;
+    // small upward bob during the sneeze fit so the player can see something
+    // is happening on the bench.
+    let k = sin(titoWakeFrame * 0.5);
+    titoY = TITO_BENCH_PY - 4 - abs(k) * 3;
+    if (titoWakeFrame >= TITO_WAKE_FRAMES) {
+      titoState = "walking";
+      titoWaypoint = 0;
+      titoY = TITO_BENCH_PY;
+    }
+    return;
+  }
+
+  // titoState === "walking"
+  if (titoWaypoint >= TITO_PATH_TILES.length) {
+    titoState   = "atBooth";
+    titoAtBooth = true;
+    wheelTurning = true;
+    titoX = FERRIS_BOOTH_PX;
+    titoY = FERRIS_BOOTH_PY;
+    return;
+  }
+  let wp = TITO_PATH_TILES[titoWaypoint];
+  let tx = wp[0] * TILE;
+  let ty = wp[1] * TILE;
+  let dx = tx - titoX;
+  let dy = ty - titoY;
+  let d  = Math.hypot(dx, dy);
+  if (d < TITO_WALK_SPEED) {
+    titoX = tx;
+    titoY = ty;
+    titoWaypoint++;
+  } else {
+    titoX += (dx / d) * TITO_WALK_SPEED;
+    titoY += (dy / d) * TITO_WALK_SPEED;
+  }
+}
+
+function drawTitoBench(x, y) {
+  // Wood-slat bench sitting on the dirt south of the Restrooms. The dust
+  // patch is drawn under it so the player has a visual cue to dig.
+  push();
+  translate(x, y);
+  noStroke();
+  // dust patch under the bench
+  fill(190, 165, 120);
+  ellipse(0, 14, 50, 12);
+  fill(170, 145, 100, 200);
+  ellipse(-6, 16, 22, 6);
+  ellipse( 8, 15, 18, 5);
+  // shadow
+  fill(0, 0, 0, 70);
+  ellipse(0, 12, 56, 8);
+  // legs
+  fill(90, 60, 40);
+  rect(-22, -2, 4, 16, 1);
+  rect( 18, -2, 4, 16, 1);
+  // seat
+  fill(140, 95, 55);
+  rect(-26, -8, 52, 6, 2);
+  fill(120, 80, 45);
+  rect(-26, -3, 52, 2);
+  // back rest
+  fill(140, 95, 55);
+  rect(-24, -22, 48, 4, 2);
+  rect(-24, -16, 48, 3, 1);
+  // back posts
+  fill(110, 75, 45);
+  rect(-22, -22, 3, 16);
+  rect( 19, -22, 3, 16);
+  pop();
+}
+
+function drawSleepingTito(x, y) {
+  // Tito flat on his back on the bench, hat over his face, snoring zzz.
+  push();
+  translate(x, y);
+  noStroke();
+  // body lying horizontally on the seat (legs hang slightly off the right end)
+  // legs
+  fill(60, 60, 80);
+  rect(8, -10, 22, 5, 1);   // pants thighs
+  rect(8, -4,  22, 5, 1);
+  // shoes
+  fill(40, 30, 25);
+  ellipse(32, -7, 8, 5);
+  ellipse(32, -1, 8, 5);
+  // torso (striped vest)
+  fill(220, 80, 60);
+  rect(-20, -10, 28, 12, 2);
+  // vest stripes
+  fill(240, 240, 230);
+  rect(-20, -8, 28, 2);
+  rect(-20, -2, 28, 2);
+  // arm draped down the front of the bench
+  fill(230, 190, 160);
+  rect(-4, 0, 4, 9, 1);
+  // head (resting on the back-end of the bench)
+  fill(230, 190, 160);
+  ellipse(-22, -8, 12, 11);
+  // ear
+  ellipse(-19, -8, 3, 4);
+  // operator's cap pulled over the face
+  fill(60, 90, 140);
+  arc(-22, -10, 14, 10, PI, TWO_PI);
+  rect(-29, -10, 14, 3, 1);
+  // brim
+  fill(40, 60, 100);
+  rect(-30, -8, 16, 2, 1);
+  // mustache poking out under the cap
+  fill(80, 50, 30);
+  rect(-25, -3, 8, 1.5, 1);
+  // chin
+  fill(220, 175, 145);
+  ellipse(-17, -3, 4, 3);
+  pop();
+}
+
+function drawStandingTito(x, y, walking) {
+  // Standing Tito after the sneeze. Used while he's marching to the booth
+  // and once he's in the booth.
+  push();
+  translate(x, y);
+  let s = 1.0;
+  let bob = walking ? sin(frameCount * 0.25) * 1.2 : 0;
+  noStroke();
+  // shadow
+  fill(0, 0, 0, 70);
+  ellipse(0, 18 * s, 18 * s, 4 * s);
+  // legs
+  fill(50, 55, 80);
+  rect(-3 * s, 0 + bob, 2.5 * s, 14 * s, 1);
+  rect(0.6 * s, 0 - bob, 2.5 * s, 14 * s, 1);
+  // shoes (untied laces flop loose for laughs)
+  fill(35, 25, 20);
+  rect(-4 * s, 13 * s + bob, 4 * s, 3 * s, 1);
+  rect( 0   * s, 13 * s - bob, 4 * s, 3 * s, 1);
+  // striped vest body
+  fill(220, 80, 60);
+  rect(-5 * s, -16 * s, 10 * s, 18 * s, 2);
+  fill(240, 240, 230);
+  rect(-5 * s, -13 * s, 10 * s, 2 * s);
+  rect(-5 * s,  -7 * s, 10 * s, 2 * s);
+  rect(-5 * s,  -1 * s, 10 * s, 2 * s);
+  // arms (swinging if walking)
+  fill(230, 190, 160);
+  let armSw = walking ? sin(frameCount * 0.25) * 3 : 0;
+  rect(-7 * s, -15 * s + armSw, 2 * s, 13 * s, 1);
+  rect( 5 * s, -15 * s - armSw, 2 * s, 13 * s, 1);
+  // head
+  fill(230, 190, 160);
+  ellipse(0, -22 * s, 9 * s, 10 * s);
+  // mustache
+  fill(80, 50, 30);
+  rect(-3 * s, -19 * s, 6 * s, 1.5 * s, 1);
+  // operator cap
+  fill(60, 90, 140);
+  arc(0, -25 * s, 11 * s, 8 * s, PI, TWO_PI);
+  fill(40, 60, 100);
+  rect(-6 * s, -23 * s, 12 * s, 2 * s, 1);
+  pop();
+}
+
+function drawTitoSneezeFx(x, y, frame) {
+  // Three big "AH-CHOO!" puffs over the wake interval, plus dust particles.
+  push();
+  translate(x, y);
+  noStroke();
+  // dust cloud
+  let a = 200 - frame * 1.5;
+  if (a > 30) {
+    fill(220, 200, 150, a);
+    ellipse(-4, -2, 30 + frame * 0.3, 14);
+    ellipse(6,  -4, 22 + frame * 0.2, 12);
+    fill(255, 240, 200, a * 0.7);
+    ellipse(-2, -6, 16, 8);
+  }
+  // "AH-CHOO!" pop
+  let phase = floor(frame / 30);
+  if (frame % 30 < 22 && phase < 3) {
+    fill(255, 255, 255, 240);
+    textAlign(CENTER, CENTER);
+    textSize(11);
+    text("AH-CHOO!", 6, -22 - phase * 3);
+  }
+  pop();
+}
+
+function drawSleepZ(x, y) {
+  // Snoring zzz floating up from sleeping Tito.
+  let t = (frameCount * 0.04) % 1.0;
+  noStroke();
+  fill(255, 255, 255, 180 * (1 - t));
+  textAlign(LEFT, CENTER);
+  textSize(11 + t * 4);
+  text("z", x - 24, y - 18 - t * 14);
+  text("z", x - 18, y - 22 - t * 10);
+  text("Z", x - 12, y - 26 - t * 6);
+}
+
+function drawFerrisBooth(x, y) {
+  // Tiny operator booth east of the Ferris Wheel building. Drawn always —
+  // empty when Tito's away, with Tito visible inside once he arrives.
+  push();
+  translate(x, y);
+  noStroke();
+  // shadow
+  fill(0, 0, 0, 70);
+  ellipse(0, 16, 30, 6);
+  // base
+  fill(120, 95, 70);
+  rect(-14, -2, 28, 18, 2);
+  // body
+  fill(200, 175, 140);
+  rect(-14, -22, 28, 20, 2);
+  // window
+  fill(140, 200, 220);
+  rect(-10, -19, 20, 11, 1);
+  stroke(80, 60, 40);
+  strokeWeight(1);
+  line(0, -19, 0, -8);
+  line(-10, -13, 10, -13);
+  // roof
+  noStroke();
+  fill(170, 60, 60);
+  triangle(-16, -22, 16, -22, 0, -32);
+  // sign
+  fill(255, 235, 130);
+  rect(-12, -28, 24, 4, 1);
+  fill(50, 30, 20);
+  textAlign(CENTER, CENTER);
+  textSize(5);
+  text("OPERATOR", 0, -26);
+  pop();
+}
+
+function drawSpinningWheel(cx, cy, r, angle) {
+  // Small ferris-wheel motif drawn over the Ferris Wheel landmark to signal
+  // that the wheel is now turning. Not the endgame visual — that's a future
+  // session — just a "we made it move" indicator.
+  push();
+  translate(cx, cy);
+  rotate(angle);
+  noFill();
+  stroke(255, 245, 180);
+  strokeWeight(2);
+  ellipse(0, 0, r * 2, r * 2);
+  strokeWeight(1.2);
+  for (let i = 0; i < 8; i++) {
+    let a = (i / 8) * TWO_PI;
+    line(0, 0, cos(a) * r, sin(a) * r);
+  }
+  // gondolas as little dots
+  noStroke();
+  fill(255, 150, 80);
+  for (let i = 0; i < 8; i++) {
+    let a = (i / 8) * TWO_PI;
+    ellipse(cos(a) * r, sin(a) * r, 4, 4);
+  }
+  pop();
+}
+
 function returnToPaddock(reason) {
   gameState = STATE_PADDOCK;
   pup.x = PAD_X + PAD_W / 2;
@@ -2160,6 +2496,8 @@ function returnToPaddock(reason) {
 function updateMap() {
   if (actionMessageTimer > 0) actionMessageTimer--;
   for (const p of people) updatePerson(p);
+  updateTito();
+  if (wheelTurning) wheelAngle += 0.02;
 
   moving = false;
   let dx = 0, dy = 0;
@@ -2245,10 +2583,39 @@ function drawMap() {
     entities.push({ y: p.y, kind: "person", p: p });
   }
   entities.push({ y: pup.y, kind: "pup", bobble: bobble });
+  // Bench is always present; sort it as a normal entity so the pup walks
+  // both behind it and in front of it correctly.
+  entities.push({ y: TITO_BENCH_PY + 14, kind: "bench" });
+  // Tito himself, in his current pose. He's only worth drawing if he isn't
+  // off in the booth (drawn separately, below the wheel).
+  if (titoState !== "atBooth") {
+    entities.push({ y: titoY + 14, kind: "tito" });
+  }
+  // Operator booth — drawn as part of the layer so the wheel-area visuals
+  // can compose with the surrounding crowd.
+  entities.push({ y: FERRIS_BOOTH_PY + 16, kind: "booth" });
   entities.sort((a, b) => a.y - b.y);
   for (const e of entities) {
     if (e.kind === "person") {
       drawPersonMap(e.p);
+    } else if (e.kind === "bench") {
+      drawTitoBench(TITO_BENCH_PX, TITO_BENCH_PY);
+      if (titoState === "asleep") drawSleepZ(TITO_BENCH_PX, TITO_BENCH_PY);
+    } else if (e.kind === "tito") {
+      if (titoState === "asleep") {
+        drawSleepingTito(titoX, titoY);
+      } else if (titoState === "waking") {
+        drawSleepingTito(titoX, titoY);
+        drawTitoSneezeFx(titoX, titoY, titoWakeFrame);
+      } else if (titoState === "walking") {
+        drawStandingTito(titoX, titoY, true);
+      }
+    } else if (e.kind === "booth") {
+      drawFerrisBooth(FERRIS_BOOTH_PX, FERRIS_BOOTH_PY);
+      if (titoState === "atBooth") {
+        // Tito visible inside the booth.
+        drawStandingTito(FERRIS_BOOTH_PX, FERRIS_BOOTH_PY - 4, false);
+      }
     } else {
       drawPupSprite(pup.x, pup.y + e.bobble, 1.5, pup.dir, moving);
       noStroke();
@@ -2256,6 +2623,17 @@ function drawMap() {
       textAlign(CENTER, CENTER);
       textSize(10);
       text(pupName, pup.x, pup.y - 20);
+    }
+  }
+
+  // Spinning wheel motif overlaid on the Ferris Wheel building once Tito
+  // is at the booth and the wheel has come back to life.
+  if (wheelTurning) {
+    let wheelLm = landmarks.find(l => l.label === "Ferris Wheel");
+    if (wheelLm) {
+      let cx = (wheelLm.x + wheelLm.w / 2) * TILE;
+      let cy = (wheelLm.y + wheelLm.h / 2) * TILE;
+      drawSpinningWheel(cx, cy, 36, wheelAngle);
     }
   }
 
@@ -2325,6 +2703,19 @@ function drawMapHUD() {
   let msg;
   if (actionMessageTimer > 0) {
     msg = actionMessage;
+  } else if (titoState === "waking") {
+    msg = "Tito is sneezing himself awake!";
+  } else if (titoState === "walking") {
+    msg = "Tito is hurrying back to the Ferris Wheel booth.";
+  } else if (titoAtBooth && trailComplete) {
+    msg = "The wheel is turning and the family is up there. Head west to " +
+          "the Ferris Wheel.";
+  } else if (titoAtBooth) {
+    msg = "Tito's back in the booth. The Ferris Wheel is turning again.";
+  } else if (pupNearTitoBench() && titoState === "asleep") {
+    msg = "A man in an operator's vest is fast asleep on the bench. " +
+          "Bark and bite haven't done much. What else could " + pupName +
+          " try?";
   } else if (trailComplete) {
     msg = pupName + " knows the family is at the Ferris Wheel.";
   } else if (scentsFound.size === 0) {
