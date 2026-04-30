@@ -9,6 +9,8 @@ const STATE_TITLE   = 0;
 const STATE_STORY   = 1;
 const STATE_PADDOCK = 2;
 const STATE_MAP     = 3;
+const STATE_FERRIS  = 4;
+const STATE_END     = 5;
 let gameState = STATE_TITLE;
 
 // -- Player --
@@ -115,6 +117,45 @@ let operatorMissingDiscovered = false;
 // failed attempts they never made.
 let titoBarkTried = false;
 let titoBiteTried = false;
+
+// -- Puzzle 5: Endgame at the Ferris Wheel --
+// Once Tito's at the booth and the wheel is turning, walking up to the south
+// face of the Ferris Wheel building swaps the camera for a close-up of the
+// wheel itself. The family's gondola circles overhead. The player has to BARK
+// while that gondola is at the bottom of the arc to be heard. Other verbs
+// give flavor only — never a shortcut. After a successful timed bark a short
+// reunion cutscene plays and the game ends on a "The End" card.
+const NUM_GONDOLAS         = 8;
+const FAMILY_GONDOLA_INDEX = 6;       // chosen so the family starts near the top
+const FAMILY_BOTTOM_WINDOW = 0.44;    // ±25° in radians, per the puzzle spec
+const GONDOLA_COLORS = [
+  [220,  80,  80], [240, 200,  80], [120, 200, 130],
+  [ 80, 160, 220], [180, 110, 220], [240, 130, 170],
+  [ 80, 200, 200], [240, 160,  80],
+];
+// Endgame view layout (in canvas pixels, not world tiles).
+const ENDGAME_WHEEL_CX = 320;
+const ENDGAME_WHEEL_CY = 200;
+const ENDGAME_WHEEL_R  = 140;
+const ENDGAME_GROUND_Y = 410;
+// Stub state for Puzzle 1 (Goat) and Puzzle 2 (Trash). The puzzle doc gates
+// endgame entry on (titoAtBooth) AND (goatLoose || chiefDistracted), but
+// neither patrol exists yet. These flags are wired here so the gate can be
+// tightened in a future session — for now the entry only checks the wheel.
+let goatLoose       = false;
+let chiefDistracted = false;
+// Endgame progression
+let endgameEntered  = false;
+let reunited        = false;
+let reunionPhase    = "wait";    // "wait"|"stopping"|"stopped"|"celebrate"|"fade"
+let reunionFrame    = 0;
+let stoppingFromAngle   = 0;     // wheelAngle when the stopping ease begins
+let stoppingTargetAngle = 0;     // wheelAngle at which the family is at bottom
+const STOPPING_FRAMES   = 90;
+const STOPPED_FRAMES    = 30;
+const CELEBRATE_FRAMES  = 180;
+const FADE_FRAMES       = 90;
+let ferrisBarkAttempts  = 0;     // count of off-cycle barks, used by the HUD nudge
 
 // -- Crowd of fairgoers --
 // 150 NPCs scattered across the overworld, with denser clumps at food row,
@@ -235,6 +276,12 @@ function draw() {
   } else if (gameState === STATE_MAP) {
     updateMap();
     drawMap();
+  } else if (gameState === STATE_FERRIS) {
+    updateFerris();
+    drawFerris();
+  } else if (gameState === STATE_END) {
+    updateEnd();
+    drawEnd();
   }
 }
 
@@ -2536,6 +2583,534 @@ function returnToPaddock(reason) {
   setActionMessage(reason, 360);
 }
 
+// ---- Puzzle 5 helpers --------------------------------------------------
+// The Ferris Wheel landmark covers tiles (5..11, 10..15). The booth sits at
+// (11.5, 13.5). The pup approaches from the central east-west path (y≈18-19),
+// turning north into the wheel's southern face. This box covers that approach.
+function pupAtFerrisBase() {
+  let tx = pup.x / TILE;
+  let ty = pup.y / TILE;
+  return tx >= 4 && tx <= 13 && ty >= 15 && ty <= 18;
+}
+
+function enterFerrisEndgame() {
+  endgameEntered = true;
+  gameState     = STATE_FERRIS;
+  reunionPhase  = "wait";
+  reunionFrame  = 0;
+  ferrisBarkAttempts = 0;
+  setActionMessage(
+    pupName + " skids to a halt at the base of the Ferris Wheel. The kid is " +
+    "up there, leaning out of the gondola, scanning the crowd. Bark just as " +
+    "they swing past the bottom — that's the only moment they'll hear it.",
+    540);
+}
+
+function familyGondolaAngle() {
+  // Angle of the family's gondola in the wheel's rotation frame.
+  return wheelAngle + FAMILY_GONDOLA_INDEX * (TWO_PI / NUM_GONDOLAS);
+}
+
+function familyAtBottom() {
+  // Bottom of the wheel, in p5's y-down screen space, is HALF_PI.
+  let a = (familyGondolaAngle() - HALF_PI) % TWO_PI;
+  if (a < 0) a += TWO_PI;
+  return a < FAMILY_BOTTOM_WINDOW || a > TWO_PI - FAMILY_BOTTOM_WINDOW;
+}
+
+function familyTargetWheelAngle() {
+  // Smallest wheelAngle ≥ current at which the family lands at the bottom.
+  let base = HALF_PI - FAMILY_GONDOLA_INDEX * (TWO_PI / NUM_GONDOLAS);
+  let cycles = Math.floor((wheelAngle - base) / TWO_PI);
+  let target = base + (cycles + 1) * TWO_PI;
+  // Make sure we move forward by at least a small turn, not effectively
+  // staying put if the bark landed exactly on the boundary.
+  if (target - wheelAngle < 0.4) target += TWO_PI;
+  return target;
+}
+
+function updateFerris() {
+  if (actionMessageTimer > 0) actionMessageTimer--;
+
+  if (reunionPhase === "wait") {
+    wheelAngle += 0.02;
+    return;
+  }
+
+  reunionFrame++;
+
+  if (reunionPhase === "stopping") {
+    let t = constrain(reunionFrame / STOPPING_FRAMES, 0, 1);
+    let eased = 1 - Math.pow(1 - t, 3);   // ease-out cubic
+    wheelAngle = stoppingFromAngle +
+                 (stoppingTargetAngle - stoppingFromAngle) * eased;
+    if (reunionFrame >= STOPPING_FRAMES) {
+      wheelAngle    = stoppingTargetAngle;
+      reunionPhase  = "stopped";
+      reunionFrame  = 0;
+    }
+  } else if (reunionPhase === "stopped") {
+    if (reunionFrame >= STOPPED_FRAMES) {
+      reunionPhase = "celebrate";
+      reunionFrame = 0;
+    }
+  } else if (reunionPhase === "celebrate") {
+    if (reunionFrame >= CELEBRATE_FRAMES) {
+      reunionPhase = "fade";
+      reunionFrame = 0;
+    }
+  } else if (reunionPhase === "fade") {
+    if (reunionFrame >= FADE_FRAMES) {
+      gameState    = STATE_END;
+      reunionFrame = 0;
+    }
+  }
+}
+
+function doFerrisSniff() {
+  setActionMessage(
+    pupName + " tilts its nose straight up. HOT HOT HOT — they're directly " +
+    "above. No question. The whole gondola smells like Mom and Dad and the " +
+    "kid's funnel-cake fingers.", 360);
+}
+
+function doFerrisBite() {
+  setActionMessage(
+    pupName + " gnaws a support beam. *clack-clack* Just hurts " + pupName +
+    "'s teeth. Bad idea. The wheel is way too big for that.", 280);
+}
+
+function doFerrisDig() {
+  setActionMessage(
+    pupName + " scrapes at the ground. It's packed gravel — the kind they " +
+    "lay around rides. Nothing to dig up here.", 280);
+}
+
+function doFerrisBark() {
+  if (familyAtBottom()) {
+    // Win! Lock the wheel into "stopping" mode and start the cutscene.
+    reunited           = true;
+    reunionPhase       = "stopping";
+    reunionFrame       = 0;
+    stoppingFromAngle  = wheelAngle;
+    stoppingTargetAngle = familyTargetWheelAngle();
+    setActionMessage(
+      "BARK! BARK! BARK! The kid's head snaps around — \"" +
+      pupName.toUpperCase() + "!!!\" The whole family is shouting now. " +
+      "Tito throws the brake; the wheel groans toward a stop.", 600);
+    return;
+  }
+  ferrisBarkAttempts++;
+  let nudge = "";
+  if (ferrisBarkAttempts >= 3) {
+    nudge = " Watch the gondola — bark exactly when it swings past the bottom.";
+  } else if (ferrisBarkAttempts === 2) {
+    nudge = " Wait until they come around to the bottom and try again.";
+  }
+  setActionMessage(
+    "BARK! ...the wheel is too noisy up there. They didn't hear." + nudge,
+    240);
+}
+
+function drawFerris() {
+  // Sky — late-afternoon sun, warm but starting to drop.
+  for (let y = 0; y < height; y++) {
+    let t = y / height;
+    stroke(lerp(255, 240, t), lerp(190, 150, t), lerp(120, 110, t));
+    line(0, y, width, y);
+  }
+  noStroke();
+
+  // Distant tents and rides as silhouettes
+  drawTent( 60, 380, 56, [120,  70,  70]);
+  drawTent(135, 384, 50, [ 90,  90, 110]);
+  drawTent(525, 380, 60, [110,  60,  80]);
+  drawTent(595, 388, 45, [ 90,  80, 100]);
+
+  // Ground
+  fill(150, 130,  90);
+  rect(0, ENDGAME_GROUND_Y, width, height - ENDGAME_GROUND_Y);
+  // Gravel speckles
+  fill(130, 110,  75);
+  randomSeed(91);
+  for (let i = 0; i < 80; i++) {
+    let gx = random(width);
+    let gy = random(ENDGAME_GROUND_Y, height);
+    ellipse(gx, gy, random(2, 4), random(1, 3));
+  }
+
+  // Big Ferris Wheel
+  let wheelStill = reunionPhase !== "wait" && reunionPhase !== "stopping";
+  let kidWaving  = reunionPhase === "wait";
+  drawEndgameWheel(ENDGAME_WHEEL_CX, ENDGAME_WHEEL_CY, ENDGAME_WHEEL_R,
+                   wheelAngle, FAMILY_GONDOLA_INDEX, kidWaving, wheelStill);
+
+  // Operator booth + Tito (lower-right). Pure visual flavor — Tito is the
+  // reason the wheel turns at all, so he gets a spot in the frame.
+  drawFerrisBooth(560, 400);
+  drawStandingTito(560, 396, false);
+  // Tito waving — a little arm raised over the booth's roof
+  if (reunionPhase !== "fade") {
+    let wave = sin(frameCount * 0.18) * 3;
+    stroke(230, 190, 160);
+    strokeWeight(3);
+    line(560, 376, 564 + wave, 364);
+    noStroke();
+  }
+
+  // Pup standing on the ground looking up. During celebrate the pup walks/
+  // leaps to the family.
+  let pupX = 300, pupY = ENDGAME_GROUND_Y + 28;
+  let pupDir = 3; // facing up
+  let pupHopping = false;
+  if (reunionPhase === "celebrate") {
+    let t = constrain(reunionFrame / CELEBRATE_FRAMES, 0, 1);
+    // Kid emerges by frame 30; pup runs starting at frame 40.
+    if (reunionFrame > 40 && reunionFrame < 130) {
+      let runT = constrain((reunionFrame - 40) / 90, 0, 1);
+      pupX = lerp(300, 332, runT);
+      pupY = ENDGAME_GROUND_Y + 28 - Math.abs(sin(runT * PI * 4)) * 4;
+      pupDir = 1;
+      pupHopping = true;
+    } else if (reunionFrame >= 130) {
+      // In the kid's arms — rendered by drawReunionTableau, skip pup here.
+      pupX = -1000;
+    }
+  }
+  if (pupX > -100) {
+    drawPupSprite(pupX, pupY, 1.6, pupDir, pupHopping);
+    fill(255, 255, 255, 200);
+    textAlign(CENTER, CENTER);
+    textSize(11);
+    text(pupName, pupX, pupY - 22);
+  }
+
+  // Reunion overlay — family figures climbing out, then the hug.
+  if (reunionPhase === "celebrate" || reunionPhase === "fade") {
+    drawReunionTableau();
+  }
+
+  // Phase-specific dialogue / status banner.
+  drawFerrisHUD();
+
+  // White fade for the transition to the title card.
+  if (reunionPhase === "fade") {
+    let alpha = constrain(reunionFrame * (255 / FADE_FRAMES), 0, 255);
+    noStroke();
+    fill(255, 255, 240, alpha);
+    rect(0, 0, width, height);
+  }
+}
+
+function drawEndgameWheel(cx, cy, r, angle, familyIdx, kidWaving, stopped) {
+  push();
+  // Outer rim
+  stroke( 80,  60,  40);
+  strokeWeight(5);
+  noFill();
+  ellipse(cx, cy, r * 2, r * 2);
+  stroke(160, 130,  80);
+  strokeWeight(3);
+  ellipse(cx, cy, r * 1.92, r * 1.92);
+
+  // Spokes & gondolas
+  for (let i = 0; i < NUM_GONDOLAS; i++) {
+    let a  = angle + (TWO_PI / NUM_GONDOLAS) * i;
+    let ex = cx + cos(a) * r;
+    let ey = cy + sin(a) * r;
+    stroke( 80,  60,  40);
+    strokeWeight(2);
+    line(cx, cy, ex, ey);
+    // Gondola hanger
+    line(ex, ey, ex, ey + 14);
+    noStroke();
+
+    // Gondola body
+    let gc = GONDOLA_COLORS[i];
+    fill(gc[0], gc[1], gc[2]);
+    rect(ex - 18, ey + 14, 36, 22, 4);
+    fill(gc[0] * 0.7, gc[1] * 0.7, gc[2] * 0.7);
+    rect(ex - 18, ey + 28, 36,  8, 0, 0, 4, 4);
+    // Window
+    fill(220, 230, 255, 230);
+    rect(ex - 14, ey + 18, 28, 10, 2);
+    stroke(60, 50, 40, 180);
+    strokeWeight(1);
+    line(ex, ey + 18, ex, ey + 28);
+    noStroke();
+
+    // Family in the highlighted gondola.
+    if (i === familyIdx) {
+      // mom (left) — pink shirt
+      fill(180,  80, 100);
+      ellipse(ex - 9, ey + 22, 5, 5);
+      fill(180,  80, 100);
+      rect(ex - 11, ey + 24, 5, 5);
+      // dad (middle) — blue shirt
+      fill( 60,  80, 130);
+      ellipse(ex, ey + 22, 5, 5);
+      rect(ex - 2, ey + 24, 5, 5);
+      // kid (right) — yellow shirt, head leaning out over the rail
+      fill(230, 190,  70);
+      ellipse(ex + 9, ey + 20, 5, 5);
+      rect(ex + 6, ey + 23, 5, 5);
+      // tiny waving arm over the gondola rim
+      if (kidWaving) {
+        let armWag = sin(frameCount * 0.35) * 3;
+        stroke(230, 190, 70);
+        strokeWeight(2);
+        line(ex + 11, ey + 19, ex + 16 + armWag, ey + 13);
+        noStroke();
+      }
+      // halo so the player can find the gondola at a glance even when it's
+      // wrapped behind the rim's far side.
+      noFill();
+      stroke(255, 240, 130, 140 + 80 * sin(frameCount * 0.12));
+      strokeWeight(2);
+      ellipse(ex, ey + 24, 48, 36);
+      noStroke();
+    }
+  }
+
+  // Center hub
+  fill( 60,  40,  25);
+  ellipse(cx, cy, 24, 24);
+  fill(200, 180, 120);
+  ellipse(cx, cy, 14, 14);
+
+  // Support legs
+  stroke( 80,  60,  40);
+  strokeWeight(7);
+  line(cx, cy, cx - r * 0.55, cy + r + 60);
+  line(cx, cy, cx + r * 0.55, cy + r + 60);
+  // Cross brace
+  strokeWeight(4);
+  line(cx - r * 0.35, cy + r + 30, cx + r * 0.35, cy + r + 30);
+  pop();
+
+  // Bottom-of-arc cue: a soft glow on the ground beneath the wheel that
+  // brightens whenever the family is in the bark window. Trains the player's
+  // eye on the moment without spelling it out.
+  if (!stopped) {
+    let inWindow = familyAtBottom();
+    let glowAlpha = inWindow ? 200 : 50;
+    noStroke();
+    fill(255, 240, 130, glowAlpha);
+    ellipse(cx, cy + r + 40, 220, 30);
+  }
+}
+
+function drawReunionTableau() {
+  // Family stepping out at the bottom of the wheel and reuniting with the pup.
+  // Local frame counter starts at 0 when reunionPhase enters "celebrate".
+  let f = reunionPhase === "fade" ? CELEBRATE_FRAMES : reunionFrame;
+
+  // Position of the family-gondola at rest (matches drawEndgameWheel layout
+  // when the wheel is stopped with the family at HALF_PI).
+  let gx = ENDGAME_WHEEL_CX;
+  let gy = ENDGAME_WHEEL_CY + ENDGAME_WHEEL_R + 14;  // top of gondola body
+
+  push();
+
+  // 1. Family climbing out.
+  // - 0..30: still inside (drawn by drawEndgameWheel).
+  // - 30..90: kid steps onto ground in front; mom & dad lean out.
+  // - 90..end: family standing on ground next to the gondola.
+  let kidX, kidY, kidScale = 0.95;
+  if (f < 30) {
+    // not visible yet — handled by the wheel renderer.
+  } else if (f < 90) {
+    let t = (f - 30) / 60;
+    kidX = lerp(gx + 9, gx + 22, t);
+    kidY = lerp(gy + 4, ENDGAME_GROUND_Y + 6, t);
+  } else {
+    // Standing — kid drifts a bit toward the meeting point.
+    let t = constrain((f - 90) / 60, 0, 1);
+    kidX = lerp(gx + 22, gx + 12, t);
+    kidY = ENDGAME_GROUND_Y + 6;
+  }
+
+  if (f >= 30) {
+    // Mom & Dad standing at the gondola door from frame 60 onward.
+    if (f >= 60) {
+      drawHuman(gx - 14, ENDGAME_GROUND_Y + 6, 0.9,
+                [180,  80, 100], [240, 215, 195], "mom");
+      drawHuman(gx - 2,  ENDGAME_GROUND_Y + 6, 0.95,
+                [ 70,  95, 150], [220, 195, 175], "dad");
+    }
+    drawHuman(kidX, kidY, kidScale,
+              [230, 190,  70], [255, 220, 200], "kid");
+  }
+
+  // 2. Pup leaps into the kid's arms at frame 130, then the hug holds.
+  if (f >= 130) {
+    // Pup carried in arms, slightly above the kid's chest.
+    let hugX = kidX + 4;
+    let hugY = kidY - 16;
+    let hugBob = sin((f - 130) * 0.22) * 1.5;
+    drawPupSprite(hugX, hugY + hugBob, 1.5, 1, false);
+
+    // Hearts floating up.
+    if (f > 140) {
+      for (let i = 0; i < 3; i++) {
+        let phase = (f - 140 + i * 25) * 0.07;
+        let hx = hugX + cos(phase) * 18 + i * 4 - 8;
+        let hy = hugY - 26 - ((f - 140 + i * 25) % 80) * 0.6;
+        fill(230,  80, 110, 220);
+        noStroke();
+        ellipse(hx - 3, hy, 6, 6);
+        ellipse(hx + 3, hy, 6, 6);
+        triangle(hx - 6, hy + 1, hx + 6, hy + 1, hx, hy + 8);
+      }
+    }
+  }
+
+  // 3. Dialogue bubble from the kid — fires at frame 30, fades at frame 150.
+  if (f >= 30 && f < 170) {
+    let alpha = f < 50 ? (f - 30) * 12 : (f > 150 ? (170 - f) * 12 : 240);
+    let bubbleX = kidX !== undefined ? kidX + 36 : gx + 40;
+    let bubbleY = ENDGAME_GROUND_Y - 28;
+    let label = pupName.toUpperCase() + "!!!";
+    push();
+    noStroke();
+    textSize(14);
+    textAlign(CENTER, CENTER);
+    let bw = textWidth(label) + 18;
+    fill(255, 255, 255, alpha);
+    rect(bubbleX - bw / 2, bubbleY - 12, bw, 22, 6);
+    fill(255, 255, 255, alpha);
+    triangle(bubbleX - 8, bubbleY + 9, bubbleX, bubbleY + 9, bubbleX - 4, bubbleY + 16);
+    fill(40,  20,  20, alpha);
+    text(label, bubbleX, bubbleY - 1);
+    pop();
+  }
+
+  pop();
+}
+
+function drawFerrisHUD() {
+  // Top bar — match the overworld style.
+  noStroke();
+  fill(0, 0, 0, 130);
+  rect(0, 0, width, 28);
+  fill(255, 230, 130);
+  textAlign(LEFT, CENTER);
+  textSize(13);
+  text("LOST PUP — " + pupName, 10, 14);
+
+  textAlign(RIGHT, CENTER);
+  textSize(13);
+  fill(255, 230, 130);
+  let banner = reunionPhase === "wait" ? "AT THE FERRIS WHEEL" : "REUNION!";
+  text(banner, width - 10, 14);
+
+  // Bottom info bubble
+  let bx = 16, bw = width - 32;
+  let bh = 70, by = height - bh - 8;
+  fill(0, 0, 0, 165);
+  rect(bx, by, bw, bh, 6);
+  noFill();
+  stroke(255, 230, 130, 120);
+  strokeWeight(1);
+  rect(bx, by, bw, bh, 6);
+  noStroke();
+
+  let msg;
+  if (actionMessageTimer > 0) {
+    msg = actionMessage;
+  } else if (reunionPhase === "wait") {
+    msg = "The wheel turns slowly. The kid is leaning out, frantic. Time " +
+          "the BARK for when their gondola swings past the bottom.";
+  } else if (reunionPhase === "stopping") {
+    msg = "Tito throws the brake — the wheel groans toward a stop, the " +
+          "family's gondola easing down to the platform.";
+  } else if (reunionPhase === "stopped") {
+    msg = "The gondola settles. The kid is already fumbling with the door.";
+  } else if (reunionPhase === "celebrate") {
+    msg = "The family pours out — \"" + pupName.toUpperCase() + "!\" " +
+          pupName + " runs the last few feet on pure tail-wagging joy.";
+  } else {
+    msg = pupName + " is home.";
+  }
+  fill(255, 240, 210);
+  textAlign(LEFT, TOP);
+  textSize(11);
+  text(msg, bx + 12, by + 8, bw - 24, 38);
+
+  // Verb hints — only meaningful while the player is still trying to bark.
+  if (reunionPhase === "wait") {
+    let cy = by + bh - 14;
+    let cx = bx + 14;
+    let step = (bw - 28) / 4;
+    drawKeyHint(cx + step * 0, cy, "D", "Dig");
+    drawKeyHint(cx + step * 1, cy, "B", "Bark");
+    drawKeyHint(cx + step * 2, cy, "S", "Sniff");
+    drawKeyHint(cx + step * 3, cy, "T", "Bite");
+  } else {
+    fill(180, 180, 200, 160);
+    textAlign(CENTER, CENTER);
+    textSize(11);
+    text("— cutscene —", bx + bw / 2, by + bh - 14);
+  }
+}
+
+function updateEnd() {
+  // No animation needed beyond the title card; just keep the frame counter
+  // ticking so the pup-and-family stamp can subtly bob.
+  reunionFrame++;
+}
+
+function drawEnd() {
+  // Soft warm gradient — closing card.
+  for (let y = 0; y < height; y++) {
+    let t = y / height;
+    stroke(lerp(255, 235, t), lerp(220, 180, t), lerp(170, 130, t));
+    line(0, y, width, y);
+  }
+  noStroke();
+
+  // Big "THE END"
+  textAlign(CENTER, CENTER);
+  fill(80, 50, 30, 80);
+  textSize(56);
+  text("THE END", width / 2 + 3, 173);
+  fill(220, 80, 60);
+  text("THE END", width / 2, 170);
+
+  // Sub-line
+  fill(80, 50, 30);
+  textSize(15);
+  text(pupName + " found the family.", width / 2, 220);
+
+  // Pup-and-kid stamp at the bottom — pup curled in the kid's arms.
+  let cx = width / 2;
+  let cy = 320;
+  let bob = sin(reunionFrame * 0.04) * 2;
+  drawHuman(cx - 6, cy + bob, 1.2, [230, 190, 70], [255, 220, 200], "kid");
+  drawPupSprite(cx + 14, cy - 10 + bob, 1.6, 1, false);
+
+  // Tiny family flanking the kid.
+  drawHuman(cx - 50, cy + 4 + bob, 1.0, [180, 80, 100], [240, 215, 195], "mom");
+  drawHuman(cx + 50, cy + 4 - bob, 1.05, [70, 95, 150], [220, 195, 175], "dad");
+
+  // Hearts above
+  for (let i = 0; i < 5; i++) {
+    let t = (reunionFrame * 0.012 + i * 0.2) % 1;
+    let hx = cx + sin(reunionFrame * 0.02 + i) * 60;
+    let hy = lerp(280, 230, t);
+    let alpha = 220 * (1 - t);
+    fill(220, 80, 110, alpha);
+    ellipse(hx - 3, hy, 7, 7);
+    ellipse(hx + 3, hy, 7, 7);
+    triangle(hx - 7, hy + 1, hx + 7, hy + 1, hx, hy + 9);
+  }
+
+  // Footer
+  fill(120, 80, 50, 200);
+  textSize(11);
+  text("a state fair adventure", width / 2, height - 32);
+}
+
 function updateMap() {
   if (actionMessageTimer > 0) actionMessageTimer--;
   for (const p of people) updatePerson(p);
@@ -2586,6 +3161,12 @@ function updateMap() {
 
   camX = constrain(pup.x - width / 2, 0, MAP_W - width);
   camY = constrain(pup.y - height / 2, 0, MAP_H - height);
+
+  // Walk into the south face of the Ferris Wheel while the wheel is turning
+  // and the camera takes over for the endgame.
+  if (!endgameEntered && wheelTurning && pupAtFerrisBase()) {
+    enterFerrisEndgame();
+  }
 }
 
 function drawMap() {
@@ -2925,6 +3506,21 @@ function keyPressed() {
     else if (keyCode === 66) doOverworldBark();
     else if (keyCode === 83) doOverworldSniff();
     else if (keyCode === 84) doOverworldBite();
+    return;
+  }
+
+  if (gameState === STATE_FERRIS) {
+    // Ignore verbs once the cutscene has started — the puzzle is solved.
+    if (reunionPhase !== "wait") return;
+    if      (keyCode === 68) doFerrisDig();
+    else if (keyCode === 66) doFerrisBark();
+    else if (keyCode === 83) doFerrisSniff();
+    else if (keyCode === 84) doFerrisBite();
+    return;
+  }
+
+  if (gameState === STATE_END) {
+    // The End card is terminal — no further input. (No-op.)
     return;
   }
 }
