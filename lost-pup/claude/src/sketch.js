@@ -184,7 +184,9 @@ const AC_PATROL_Y     = 22 * TILE;
 const AC_SPEED        = 0.65;
 const AC_CHASE_SPEED  = 1.1;
 const AC_SIGHT_RADIUS = 90;              // pixels — generous, the cone is narrow
-const AC_SIGHT_HALF_ANGLE = PI / 3;      // ±60° forward fan
+// Math.PI rather than p5's PI — this is evaluated at module-load time,
+// before setup() runs, so the p5 globals aren't defined yet.
+const AC_SIGHT_HALF_ANGLE = Math.PI / 3; // ±60° forward fan
 let acState     = "patrol";              // "patrol" | "chasingGoat"
 let acX         = (AC_PATROL_LEFT + AC_PATROL_RIGHT) / 2;
 let acY         = AC_PATROL_Y;
