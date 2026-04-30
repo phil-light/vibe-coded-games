@@ -33,10 +33,15 @@ is woken) — never "you now hold the X." This is both a simplicity win and on-t
   the safety brake locked the wheel in place.
 - Tito is now napping on a bench outside the Restrooms, exhausted and ashamed.
   Until he comes back to the booth, the wheel will not move.
-- The **Chief of Operations** patrols the central east-west path between the
-  Tilt-A-Whirl and Bumper Cars. If the pup runs into his sight cone on an open
-  path, he chases the pup back toward the Horse Barn (soft fail — no game over,
-  just a teleport + dialog).
+- The **Chief of Operations** patrols the east-west path that runs *north* of
+  the Tilt-A-Whirl and Bumper Cars — the open corridor between the upper
+  landmarks (Picnic Area, Restrooms) and the rides row. This is the natural
+  west-bound route the pup takes from its Horse-Barn spawn to reach Tito or
+  the Picnic Area, so anyone going west the obvious way runs into Chief
+  Withers. (The path is *not* the central corridor between the rides and the
+  food row — that one belongs to Animal Control's beat below.) If the pup
+  runs into his sight cone on an open path, he chases the pup back toward
+  the Horse Barn (soft fail — no game over, just a teleport + dialog).
 - One **Animal Control** officer patrols the southern row of food stalls (Corn
   Dog → Funnel Cakes → BBQ Pit). Same chase-back behavior in their sight cone.
 
