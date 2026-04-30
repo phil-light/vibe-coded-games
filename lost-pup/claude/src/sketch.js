@@ -138,12 +138,72 @@ const ENDGAME_WHEEL_CX = 320;
 const ENDGAME_WHEEL_CY = 200;
 const ENDGAME_WHEEL_R  = 140;
 const ENDGAME_GROUND_Y = 410;
-// Stub state for Puzzle 1 (Goat) and Puzzle 2 (Trash). The puzzle doc gates
-// endgame entry on (titoAtBooth) AND (goatLoose || chiefDistracted), but
-// neither patrol exists yet. These flags are wired here so the gate can be
-// tightened in a future session — for now the entry only checks the wheel.
-let goatLoose       = false;
+// Stub state for Puzzle 2 (Trash). The puzzle doc gates endgame entry on
+// (titoAtBooth) AND (goatLoose || chiefDistracted); chiefDistracted lights up
+// once Puzzle 2 lands. Until then the entry only requires the wheel turning.
 let chiefDistracted = false;
+
+// -- Puzzle 1: The Loose Goat (BARK) --
+// A grumpy black-and-white goat is penned inside the south face of the
+// Petting Zoo. One slat at his eye level is already cracked; he headbutts
+// it idly while waiting for an excuse. Bark adjacent to that slat and the
+// goat finishes the job, squeezes through, and goes loose. The bored teen
+// attendant scrambles after him; Animal Control (who was patrolling the
+// food-stall row to the south) wheels around and gives chase too. Their
+// sight cone never points back at the pup again for the rest of the game.
+// Pre-solve, walking into AC's sight cone is a soft fail — pup is dumped
+// back in the paddock with all puzzle state preserved.
+const CRACKED_SLAT_TILE = [32, 15];      // tile of the splintered slat
+const CRACKED_SLAT_PX   = (CRACKED_SLAT_TILE[0] + 0.5) * TILE;
+const CRACKED_SLAT_PY   = CRACKED_SLAT_TILE[1] * TILE;
+const PETTING_ZOO_GATE_TILE = [34, 15];  // tile of the small swing gate
+const GOAT_BARK_REACH   = 40;            // pixels from slat to register
+const GOAT_FENCE_REACH  = 28;            // pixels south of the south fence
+// Goat sprite — stands inside the pen at the cracked slat while penned,
+// then squeezes through and roams the south of the map once free.
+const GOAT_PEN_X = (CRACKED_SLAT_TILE[0] + 0.5) * TILE;
+const GOAT_PEN_Y = (CRACKED_SLAT_TILE[1] - 1.0) * TILE;
+const GOAT_ESCAPE_FRAMES = 70;           // squeeze-through animation
+let goatLoose       = false;             // true once the slat is busted open
+let goatState       = "penned";          // "penned" | "escaping" | "loose"
+let goatX           = GOAT_PEN_X;
+let goatY           = GOAT_PEN_Y;
+let goatDir         = 1;                 // 0 down, 1 left, 2 right, 3 up
+let goatT           = 0;                 // animation phase
+let goatTargetX     = goatX;
+let goatTargetY     = goatY;
+let goatRepick      = 0;
+let goatEscapeFrame = 0;
+// Animal Control patrol along the row of food stalls (Corn Dog → Funnel
+// Cakes → BBQ Pit). Walks east-west in a fixed corridor; sight cone fans
+// out forward. Once the goat is loose, switches to "chasingGoat" and never
+// looks at the pup again.
+const AC_PATROL_LEFT  = 4 * TILE;
+const AC_PATROL_RIGHT = 17 * TILE;
+const AC_PATROL_Y     = 22 * TILE;
+const AC_SPEED        = 0.65;
+const AC_CHASE_SPEED  = 1.1;
+const AC_SIGHT_RADIUS = 90;              // pixels — generous, the cone is narrow
+const AC_SIGHT_HALF_ANGLE = PI / 3;      // ±60° forward fan
+let acState     = "patrol";              // "patrol" | "chasingGoat"
+let acX         = (AC_PATROL_LEFT + AC_PATROL_RIGHT) / 2;
+let acY         = AC_PATROL_Y;
+let acPatrolDir = 1;                     // +1 walking right, -1 walking left
+let acT         = 0;                     // animation phase
+// Bored attendant teen at the gate. Stands and scrolls her phone until the
+// goat goes loose; then she takes off chasing him.
+const TEEN_HOME_X = (PETTING_ZOO_GATE_TILE[0] + 0.5) * TILE;
+const TEEN_HOME_Y = (PETTING_ZOO_GATE_TILE[1] + 0.7) * TILE;
+let teenState   = "bored";               // "bored" | "running"
+let teenX       = TEEN_HOME_X;
+let teenY       = TEEN_HOME_Y;
+let teenDir     = 3;                     // facing up toward the gate
+let teenT       = 0;
+// Verbs the player has actually tried at the south fence, mirrored from
+// the Tito-bench pattern so the HUD nudge can name them honestly.
+let goatBarkTried = false;
+let goatBiteTried = false;
+let goatDigTried  = false;
 // Endgame progression
 let endgameEntered  = false;
 let reunited        = false;
@@ -1873,6 +1933,17 @@ function doOverworldSniff() {
     return;
   }
 
+  // Puzzle 1: sniffing along the Petting Zoo south fence picks up the goat.
+  // Pre-solve only — once the goat's gone the smell goes with him and the
+  // ambient/person logic below takes over.
+  if (pupAtPettingZooSouthFence() && !goatLoose) {
+    setActionMessage(
+      pupName + " sniffs along the fence — goat, hay, an old apple core. " +
+      "The black-and-white one over there smells like he's been waiting " +
+      "all day for an excuse.", 320);
+    return;
+  }
+
   let np = nearestPerson();
   if (np && np.distance < PERSON_REACH) {
     setActionMessage(
@@ -1903,6 +1974,28 @@ function doOverworldBark() {
     setActionMessage(
       "BARK! Tito's snore hitches — then resumes, louder. He just rolls " +
       "over. He worked a double shift; this is a deep sleep.", 280);
+    return;
+  }
+  // Puzzle 1: bark adjacent to the cracked slat — solves it. Gated on
+  // goatState rather than goatLoose so a second bark during the squeeze-
+  // through animation doesn't re-fire the solve message.
+  if (pupNearCrackedSlat() && goatState === "penned") {
+    goatBarkTried = true;
+    triggerGoatRelease();
+    setActionMessage(
+      "BARK! The black-and-white goat snaps to attention, lowers his head, " +
+      "and CHARGES the cracked slat. *CRRRACK* — the wood splinters and " +
+      "the goat squeezes through into the fairgrounds. The teen finally " +
+      "looks up, swears, and takes off after him. Animal Control wheels " +
+      "around and gives chase.", 540);
+    return;
+  }
+  // Puzzle 1: bark elsewhere along the south fence — flavor only.
+  if (pupAtPettingZooSouthFence() && goatState === "penned") {
+    goatBarkTried = true;
+    setActionMessage(
+      pupName + " barks. The rabbits skitter and the chickens flap their " +
+      "wings — but the goat doesn't even look up.", 240);
     return;
   }
   let np = nearestPerson();
@@ -1949,6 +2042,14 @@ function doOverworldBite() {
       280);
     return;
   }
+  // Puzzle 1: try to bite the fence — too thick, splinter in the muzzle.
+  if (pupAtPettingZooSouthFence() && !goatLoose) {
+    goatBiteTried = true;
+    setActionMessage(
+      pupName + " gnaws a fence slat. *crunch* The wood is too thick — " +
+      "tastes like splinters and disappointment.", 240);
+    return;
+  }
   let np = nearestPerson();
   if (np && np.distance < PERSON_REACH) {
     returnToPaddock(
@@ -1971,6 +2072,15 @@ function doOverworldDig() {
       "dust kicks up straight into Tito's face. *AH-CHOO! AH-CHOO! AH-CHOO!* " +
       "\"AAAH! THE WHEEL! THE WHEEL!\" He bolts off the bench toward the " +
       "Ferris Wheel.", 540);
+    return;
+  }
+  // Puzzle 1: dig the dirt at the south fence — buried kid-sized carrots.
+  if (pupAtPettingZooSouthFence() && !goatLoose) {
+    goatDigTried = true;
+    setActionMessage(
+      pupName + " digs along the fence and uncovers a stash of stubby, " +
+      "kid-sized carrots — pocketed by some petting-zoo visitor and forgotten. " +
+      "*chomp* Cute, but the goat is unimpressed.", 280);
     return;
   }
   if (random() < 0.20) {
@@ -2575,12 +2685,460 @@ function drawSpinningWheel(cx, cy, r, angle) {
   pop();
 }
 
+// ---- Puzzle 1 visuals --------------------------------------------------
+// South fence of the Petting Zoo, drawn over the south edge of the landmark
+// rectangle so the goat appears penned behind it. One slat is visibly
+// cracked (zigzag detail); a small swing gate sits to its east. Once the
+// goat busts through, the cracked slat is drawn missing.
+function drawPettingZooSouthFence() {
+  let lm = pettingZooLandmark();
+  if (!lm) return;
+  let lx = lm.x * TILE;
+  let lw = lm.w * TILE;
+  let fenceY = (lm.y + lm.h) * TILE;
+
+  push();
+  noStroke();
+  // Top and bottom rails
+  fill(120, 85, 55);
+  rect(lx - 4, fenceY - 14, lw + 8, 4);
+  rect(lx - 4, fenceY -  2, lw + 8, 4);
+
+  // Vertical slats — 2 per tile. One slat is drawn cracked (the one closest
+  // to the bark target); two slats around the gate centerline are skipped to
+  // make the gate gap. Pre-computing the indices keeps a single slat
+  // consistently marked even though the bark-target x falls between slats.
+  let slatCount = lm.w * 2;
+  let slatW = 4;
+  let stride = lw / slatCount;
+  let gateCenterX = (PETTING_ZOO_GATE_TILE[0] + 0.5) * TILE;
+
+  let crackedI = 0;
+  let bestDelta = Infinity;
+  let gateSet = {};
+  for (let i = 0; i < slatCount; i++) {
+    let cx = lx + (i + 0.5) * stride;
+    let dCrack = Math.abs(cx - CRACKED_SLAT_PX);
+    if (dCrack < bestDelta) { bestDelta = dCrack; crackedI = i; }
+    if (Math.abs(cx - gateCenterX) < stride) gateSet[i] = true;
+  }
+
+  for (let i = 0; i < slatCount; i++) {
+    if (gateSet[i]) continue;
+    let isCracked = (i === crackedI);
+    if (isCracked && goatLoose) continue;  // splintered open after the bark
+    let cx = lx + (i + 0.5) * stride;
+    let sx = cx - slatW / 2;
+
+    fill(140, 100, 60);
+    rect(sx, fenceY - 14, slatW, 14);
+    fill(110,  75,  45);
+    rect(sx, fenceY - 4, slatW, 2);
+    if (isCracked) {
+      // Zigzag crack down the middle of the slat.
+      stroke(40, 25, 15, 220);
+      strokeWeight(1);
+      noFill();
+      beginShape();
+      vertex(sx + 1, fenceY - 13);
+      vertex(sx + 3, fenceY - 10);
+      vertex(sx + 1, fenceY -  7);
+      vertex(sx + 3, fenceY -  4);
+      vertex(sx + 1, fenceY -  1);
+      endShape();
+      noStroke();
+    }
+  }
+
+  // Gate — a small two-rail swing gate between two tall posts.
+  let gx = gateCenterX;
+  fill(95, 65, 40);
+  rect(gx - 18, fenceY - 18, 4, 22);
+  rect(gx + 14, fenceY - 18, 4, 22);
+  fill(150, 110,  70);
+  rect(gx - 13, fenceY - 14, 26, 4);
+  rect(gx - 13, fenceY -  6, 26, 4);
+  // Cross brace
+  stroke(115,  80,  45);
+  strokeWeight(1.5);
+  line(gx - 12, fenceY - 2, gx + 12, fenceY - 14);
+  noStroke();
+
+  // After release: scattered splinters where the slat blew apart.
+  if (goatLoose) {
+    let cx = CRACKED_SLAT_PX;
+    fill(120, 85, 50, 220);
+    push();
+    translate(cx, fenceY + 4);
+    rotate(-0.3);
+    rect(-7, 0, 10, 2);
+    pop();
+    push();
+    translate(cx + 4, fenceY + 8);
+    rotate(0.4);
+    rect(-3, 0, 7, 2);
+    pop();
+  }
+
+  pop();
+}
+
+// Goat sprite — side-view, white with black spots, small horns. Used both
+// in the pen and once he's loose. The body is drawn facing left; for dir 2
+// (facing right) the whole sprite is x-flipped via p5's scale().
+function drawGoat(x, y, sc, dir, isMoving, headbutt) {
+  push();
+  translate(x, y);
+  if (dir === 2) scale(-1, 1);   // mirror to face right
+  let s = sc;
+
+  noStroke();
+  // Shadow
+  fill(0, 0, 0, 70);
+  ellipse(0, 9 * s, 24 * s, 4 * s);
+
+  // Body (white)
+  fill(245, 245, 240);
+  ellipse(0, 0, 24 * s, 13 * s);
+
+  // Spots (black)
+  fill(40, 40, 45);
+  ellipse(-6 * s, -2 * s, 7 * s, 5 * s);
+  ellipse( 5 * s,  2 * s, 6 * s, 4 * s);
+  ellipse( 9 * s, -3 * s, 4 * s, 3 * s);
+
+  // Legs
+  let stepF = isMoving ? sin(frameCount * 0.35) * 1.5 * s : 0;
+  fill(60, 50, 45);
+  rect(-9 * s,  4 * s, 2.5 * s, 6 * s + stepF);
+  rect(-4 * s,  4 * s, 2.5 * s, 6 * s - stepF);
+  rect( 3 * s,  4 * s, 2.5 * s, 6 * s + stepF);
+  rect( 8 * s,  4 * s, 2.5 * s, 6 * s - stepF);
+
+  // Head — leans forward + down on a headbutt frame.
+  let lunge = headbutt ? 1 : 0;
+  let hx = -12 * s - lunge * 2 * s;
+  let hy = -3 * s + lunge * 4 * s;
+  fill(245, 245, 240);
+  ellipse(hx, hy, 11 * s, 9 * s);
+  // Snout
+  fill(200, 175, 175);
+  ellipse(hx - 4 * s, hy + 1 * s, 5 * s, 4 * s);
+  // Eye
+  fill(20, 20, 25);
+  ellipse(hx + 1 * s, hy - 1 * s, 1.6 * s, 1.8 * s);
+  // Horns
+  fill(160, 130,  80);
+  triangle(hx - 1 * s, hy - 4 * s,
+           hx + 2 * s, hy - 8 * s,
+           hx + 4 * s, hy - 4 * s);
+  triangle(hx + 2 * s, hy - 4 * s,
+           hx + 5 * s, hy - 8 * s,
+           hx + 7 * s, hy - 4 * s);
+  // Beard
+  fill(60, 50, 45);
+  triangle(hx - 4 * s, hy + 3 * s,
+           hx - 2 * s, hy + 6 * s,
+           hx - 1 * s, hy + 3 * s);
+
+  // Tail — short stub, flicks while moving.
+  let tail = isMoving ? sin(frameCount * 0.4) * 0.6 : 0.2;
+  push();
+  translate(11 * s, -2 * s);
+  rotate(tail);
+  fill(245, 245, 240);
+  rect(0, 0, 4 * s, 2 * s, 1);
+  pop();
+
+  pop();
+}
+
+// Animal Control officer — uniformed adult with a peaked cap and a
+// clipboard. Built on top of drawHuman for the body, with a custom hat
+// and clipboard overlay so the silhouette reads clearly even at distance.
+function drawAnimalControl(x, y, walking) {
+  let s = 1.05;
+  push();
+  translate(x, y);
+  noStroke();
+  // Shadow
+  fill(0, 0, 0, 80);
+  ellipse(0, 18 * s, 22 * s, 5 * s);
+  // Legs (dark khaki uniform pants)
+  let stepF = walking ? sin(acT * 6) * 1.6 * s : 0;
+  fill(60, 65, 55);
+  rect(-3 * s, 0, 2.5 * s, 14 * s + stepF, 1);
+  rect(0.6 * s, 0, 2.5 * s, 14 * s - stepF, 1);
+  // Boots
+  fill(35, 30, 25);
+  rect(-3.5 * s, 13 * s + stepF, 3.4 * s, 3 * s, 1);
+  rect( 0.4 * s, 13 * s - stepF, 3.4 * s, 3 * s, 1);
+  // Body (khaki uniform shirt)
+  fill(140, 130,  90);
+  rect(-5.5 * s, -16 * s, 11 * s, 18 * s, 2);
+  // Belt
+  fill(55, 40, 30);
+  rect(-5.5 * s, 0,       11 * s, 2 * s);
+  // Badge
+  fill(220, 200, 110);
+  ellipse(-3 * s, -10 * s, 3.5 * s, 3.5 * s);
+  fill(180, 150,  60);
+  ellipse(-3 * s, -10 * s, 1.6 * s, 1.6 * s);
+  // Arms
+  fill(140, 130,  90);
+  let armSwing = walking ? sin(acT * 6) * 1.0 * s : 0;
+  rect(-7.5 * s, -14 * s + armSwing, 2 * s, 12 * s, 1);
+  rect( 5.5 * s, -14 * s - armSwing, 2 * s, 12 * s, 1);
+  // Hands (skin)
+  fill(220, 195, 175);
+  ellipse(-6.5 * s, -2 * s + armSwing, 2.5 * s, 2.5 * s);
+  ellipse( 6.5 * s, -2 * s - armSwing, 2.5 * s, 2.5 * s);
+  // Head
+  fill(220, 195, 175);
+  ellipse(0, -22 * s, 9 * s, 10 * s);
+  // Sideburns / short hair
+  fill(60, 45, 35);
+  rect(-4.5 * s, -25 * s, 9 * s, 2 * s, 1);
+  // Peaked cap
+  fill(50, 60, 50);
+  arc(0, -25 * s, 11 * s, 7 * s, PI, TWO_PI);
+  rect(-5.5 * s, -25 * s, 11 * s, 2 * s);
+  // Cap brim
+  fill(35, 45, 35);
+  rect(-7 * s, -23 * s, 14 * s, 2 * s, 1);
+  // Cap badge
+  fill(220, 200, 110);
+  rect(-1.2 * s, -27 * s, 2.5 * s, 2 * s);
+  // Clipboard in the right hand
+  fill(220, 220, 230);
+  rect(5 * s, -2 * s, 6 * s, 8 * s, 1);
+  fill(60, 60, 70);
+  rect(5 * s, -2 * s, 6 * s, 1.5 * s);
+  pop();
+}
+
+// AC sight cone — translucent yellow fan in front of the officer while he
+// patrols. Goes away the moment he's chasing the goat. Lets the player see
+// what they need to slip around.
+function drawACSightCone() {
+  if (acState !== "patrol") return;
+  push();
+  translate(acX, acY);
+  if (acPatrolDir < 0) scale(-1, 1);
+  noStroke();
+  fill(255, 240, 130, 60);
+  let r = AC_SIGHT_RADIUS;
+  let a = AC_SIGHT_HALF_ANGLE;
+  beginShape();
+  vertex(0, 0);
+  for (let t = -a; t <= a; t += 0.08) {
+    vertex(cos(t) * r, sin(t) * r);
+  }
+  endShape(CLOSE);
+  pop();
+}
+
+// Bored attendant teen — leaning, scrolling her phone. After release she's
+// a running figure with the phone abandoned (no more phone glow).
+function drawAttendantTeen(x, y, dir) {
+  push();
+  translate(x, y);
+  let s = 0.95;
+  noStroke();
+  // Shadow
+  fill(0, 0, 0, 70);
+  ellipse(0, 18 * s, 18 * s, 4 * s);
+
+  let bored = teenState === "bored";
+  let lean  = bored ? 0.18 : 0;
+  if (lean !== 0) rotate(lean);
+
+  // Legs
+  let stepF = !bored ? sin(teenT * 5) * 1.6 * s : 0;
+  fill(60, 80, 130);
+  rect(-3 * s, 0, 2.5 * s, 14 * s + stepF, 1);
+  rect(0.6 * s, 0, 2.5 * s, 14 * s - stepF, 1);
+  // Sneakers
+  fill(240, 240, 240);
+  rect(-3.5 * s, 13 * s + stepF, 3.5 * s, 3 * s, 1);
+  rect( 0.4 * s, 13 * s - stepF, 3.5 * s, 3 * s, 1);
+  // Body — bright tank top
+  fill(220, 110, 150);
+  rect(-5 * s, -16 * s, 10 * s, 18 * s, 2);
+  // Arms
+  fill(230, 200, 180);
+  let armSwing = !bored ? sin(teenT * 5) * 1.4 * s : 0;
+  rect(-7 * s, -14 * s + armSwing, 2 * s, 12 * s, 1);
+  rect( 5 * s, -14 * s - armSwing, 2 * s, 12 * s, 1);
+  // Head
+  fill(230, 200, 180);
+  ellipse(0, -22 * s, 9 * s, 10 * s);
+  // Long hair tied back
+  fill(70, 45, 30);
+  arc(0, -23 * s, 10 * s, 8 * s, PI, TWO_PI);
+  rect(-1.5 * s, -22 * s, 3 * s, 6 * s, 1);
+  // Phone, only while bored — held in front, pale glow on her face.
+  if (bored) {
+    fill(40, 40, 50);
+    rect(-3 * s, -8 * s, 6 * s, 4 * s, 1);
+    fill(180, 230, 255, 200);
+    rect(-2.5 * s, -7.5 * s, 5 * s, 3 * s);
+    fill(200, 230, 255, 90);
+    ellipse(0, -16 * s, 12 * s, 6 * s);
+  }
+  pop();
+}
+
 function returnToPaddock(reason) {
   gameState = STATE_PADDOCK;
   pup.x = PAD_X + PAD_W / 2;
   pup.y = PAD_Y + PAD_H / 2 + 10;
   pup.dir = 0;
   setActionMessage(reason, 360);
+}
+
+// ---- Puzzle 1 helpers --------------------------------------------------
+function pupNearCrackedSlat() {
+  return dist(pup.x, pup.y, CRACKED_SLAT_PX, CRACKED_SLAT_PY) < GOAT_BARK_REACH;
+}
+
+// Pup is on the dirt margin immediately south of the Petting Zoo's south
+// fence. Used for the bark/sniff/bite/dig flavor that isn't the cracked-slat
+// solve itself.
+function pupAtPettingZooSouthFence() {
+  let lm = pettingZooLandmark();
+  if (!lm) return false;
+  let lx = lm.x * TILE;
+  let lw = lm.w * TILE;
+  let fenceY = (lm.y + lm.h) * TILE;
+  return pup.x > lx - 4 && pup.x < lx + lw + 4 &&
+         pup.y > fenceY - 4 && pup.y < fenceY + GOAT_FENCE_REACH;
+}
+
+function pettingZooLandmark() {
+  for (const lm of landmarks) {
+    if (lm.label === "Petting Zoo") return lm;
+  }
+  return null;
+}
+
+function triggerGoatRelease() {
+  goatState       = "escaping";
+  goatEscapeFrame = 0;
+  acState         = "chasingGoat";
+  teenState       = "running";
+  teenT           = 0;
+}
+
+function updateGoat() {
+  goatT += 0.06;
+
+  if (goatState === "penned") {
+    // Idle headbutt — every ~110 frames the goat lunges once toward the slat.
+    return;
+  }
+
+  if (goatState === "escaping") {
+    goatEscapeFrame++;
+    // First ~25 frames: shimmy through the splintered slat. Then break south
+    // into open fairground and start the loose wandering.
+    if (goatEscapeFrame < 25) {
+      goatY += 0.45;
+      goatDir = 0;
+    } else if (goatEscapeFrame < 55) {
+      goatY += 1.1;
+      goatX += sin(goatEscapeFrame * 0.2) * 0.8;
+      goatDir = 0;
+    } else {
+      // Pick a roaming target out in the south corridor and start cruising.
+      if (goatRepick <= 0) {
+        goatTargetX = random(8 * TILE, 30 * TILE);
+        goatTargetY = random(20 * TILE, 27 * TILE);
+        goatRepick  = 60;
+      }
+      goatRepick--;
+    }
+    if (goatEscapeFrame >= GOAT_ESCAPE_FRAMES) {
+      goatState  = "loose";
+      goatLoose  = true;
+      goatRepick = 0;
+    }
+    return;
+  }
+
+  // goatState === "loose": zigzag around the south of the map, never going
+  // far enough north to threaten the patrol path the pup uses.
+  goatRepick--;
+  if (goatRepick <= 0) {
+    goatRepick = floor(random(60, 200));
+    goatTargetX = random(4 * TILE, 36 * TILE);
+    goatTargetY = random(20 * TILE, 28 * TILE);
+  }
+  let dx = goatTargetX - goatX;
+  let dy = goatTargetY - goatY;
+  let d  = Math.hypot(dx, dy);
+  if (d > 1) {
+    let speed = 1.5;
+    goatX += (dx / d) * speed;
+    goatY += (dy / d) * speed;
+    if (Math.abs(dx) > Math.abs(dy)) goatDir = dx > 0 ? 2 : 1;
+    else                              goatDir = dy > 0 ? 0 : 3;
+  }
+}
+
+function updateTeen() {
+  teenT += 0.06;
+  if (teenState !== "running") return;
+  // Run toward the goat — entertaining flavor, no mechanical effect.
+  let dx = goatX - teenX;
+  let dy = goatY - teenY;
+  let d  = Math.hypot(dx, dy) || 1;
+  teenX += (dx / d) * 0.75;
+  teenY += (dy / d) * 0.75;
+  if (Math.abs(dx) > Math.abs(dy)) teenDir = dx > 0 ? 2 : 1;
+  else                              teenDir = dy > 0 ? 0 : 3;
+}
+
+function pupInACSightCone() {
+  if (acState !== "patrol") return false;
+  let dx = pup.x - acX;
+  let dy = pup.y - acY;
+  let d  = Math.hypot(dx, dy);
+  if (d > AC_SIGHT_RADIUS) return false;
+  if (d < 12) return true;  // standing right next to AC counts
+  let forwardAngle = acPatrolDir > 0 ? 0 : PI;
+  let angle = Math.atan2(dy, dx);
+  let diff  = angle - forwardAngle;
+  while (diff >  PI) diff -= TWO_PI;
+  while (diff < -PI) diff += TWO_PI;
+  return Math.abs(diff) < AC_SIGHT_HALF_ANGLE;
+}
+
+function updateAnimalControl() {
+  acT += 0.06;
+
+  if (acState === "patrol") {
+    acX += AC_SPEED * acPatrolDir;
+    if (acX >= AC_PATROL_RIGHT) { acX = AC_PATROL_RIGHT; acPatrolDir = -1; }
+    if (acX <= AC_PATROL_LEFT)  { acX = AC_PATROL_LEFT;  acPatrolDir =  1; }
+    if (pupInACSightCone()) {
+      returnToPaddock(
+        "\"HEY! NO LOOSE DOGS!\" Animal Control scoops " + pupName +
+        " up by the scruff and dumps the pup back in the holding paddock. " +
+        "(Try again — and stay clear of the food-stall row.)");
+    }
+    return;
+  }
+
+  // chasingGoat: tail the loose goat, never the pup.
+  let dx = goatX - acX;
+  let dy = goatY - acY;
+  let d  = Math.hypot(dx, dy);
+  if (d > 24) {
+    acX += (dx / d) * AC_CHASE_SPEED;
+    acY += (dy / d) * AC_CHASE_SPEED;
+    if (Math.abs(dx) > Math.abs(dy)) acPatrolDir = dx > 0 ? 1 : -1;
+  }
 }
 
 // ---- Puzzle 5 helpers --------------------------------------------------
@@ -3115,6 +3673,9 @@ function updateMap() {
   if (actionMessageTimer > 0) actionMessageTimer--;
   for (const p of people) updatePerson(p);
   updateTito();
+  updateGoat();
+  updateTeen();
+  updateAnimalControl();
   checkOperatorDiscovery();
   if (wheelTurning) wheelAngle += 0.02;
 
@@ -3197,6 +3758,18 @@ function drawMap() {
     text(lm.label, lx + lw / 2, ly + lh / 2);
   }
 
+  // Goat-in-pen drawn before the south fence so the slats appear in front
+  // of the goat (he's visibly penned). Once he's escaping or loose he goes
+  // into the y-sorted entity layer below.
+  if (goatState === "penned") {
+    let headbutt = sin(goatT * 0.9) > 0.85;
+    drawGoat(goatX, goatY, 0.95, 1, false, headbutt);
+  }
+  drawPettingZooSouthFence();
+  // AC sight cone — drawn under the entity layer so the officer sprite
+  // and any people drift across the top of it cleanly.
+  drawACSightCone();
+
   // Y-sorted entity layer. Each entity (pup or person) is drawn as one
   // complete unit (its own push/pop), and entities are sorted by foot Y
   // so a person standing further south properly draws on top of one
@@ -3222,6 +3795,16 @@ function drawMap() {
   // Operator booth — drawn as part of the layer so the wheel-area visuals
   // can compose with the surrounding crowd.
   entities.push({ y: FERRIS_BOOTH_PY + 16, kind: "booth" });
+  // Animal Control officer — always present, pacing food row pre-solve and
+  // chasing the goat post-solve.
+  entities.push({ y: acY + 16, kind: "ac" });
+  // Bored attendant teen at the gate (or chasing post-release).
+  entities.push({ y: teenY + 14, kind: "teen" });
+  // Goat once he's broken out of the pen — y-sorted so the pup can pass in
+  // front of / behind him on the open map.
+  if (goatState === "escaping" || goatState === "loose") {
+    entities.push({ y: goatY + 8, kind: "goat" });
+  }
   entities.sort((a, b) => a.y - b.y);
   for (const e of entities) {
     if (e.kind === "person") {
@@ -3246,6 +3829,13 @@ function drawMap() {
         // Tito visible inside the booth.
         drawStandingTito(FERRIS_BOOTH_PX, FERRIS_BOOTH_PY - 4, false);
       }
+    } else if (e.kind === "ac") {
+      let walking = acState === "patrol" || acState === "chasingGoat";
+      drawAnimalControl(acX, acY, walking);
+    } else if (e.kind === "teen") {
+      drawAttendantTeen(teenX, teenY, teenDir);
+    } else if (e.kind === "goat") {
+      drawGoat(goatX, goatY, 0.95, goatDir, true, false);
     } else {
       drawPupSprite(pup.x, pup.y + e.bobble, 1.5, pup.dir, moving);
       noStroke();
@@ -3358,6 +3948,28 @@ function drawMapHUD() {
       msg = "A man in an operator's vest is fast asleep on the bench. " +
             "What does " + pupName + " do?";
     }
+  } else if (pupAtPettingZooSouthFence() && !goatLoose) {
+    // Puzzle 1 nudge — only fires when the player has actually walked up
+    // to the south fence. The verbs they've already tried get named so
+    // the hint stays honest.
+    let triedBits = [];
+    if (goatBiteTried) triedBits.push("biting");
+    if (goatDigTried)  triedBits.push("digging");
+    if (triedBits.length === 0) {
+      msg = "A grumpy black-and-white goat eyeballs the cracked slat in " +
+            "front of him. The teen at the gate isn't paying attention. " +
+            "What does " + pupName + " do?";
+    } else {
+      let tried = triedBits.length === 2
+        ? triedBits[0] + " and " + triedBits[1]
+        : triedBits[0];
+      msg = "The goat is still penned and the slat is still standing. " +
+            tried.charAt(0).toUpperCase() + tried.slice(1) +
+            " didn't help — what would actually get him to charge?";
+    }
+  } else if (goatState === "loose") {
+    msg = "Animal Control is across the south of the map chasing the " +
+          "loose goat. The food-stall row is clear.";
   } else if (trailComplete) {
     msg = pupName + " knows the family is at the Ferris Wheel.";
   } else if (scentsFound.size === 0) {
