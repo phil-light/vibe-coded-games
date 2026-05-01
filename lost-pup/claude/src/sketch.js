@@ -138,10 +138,58 @@ const ENDGAME_WHEEL_CX = 320;
 const ENDGAME_WHEEL_CY = 200;
 const ENDGAME_WHEEL_R  = 140;
 const ENDGAME_GROUND_Y = 410;
-// Stub state for Puzzle 2 (Trash). The puzzle doc gates endgame entry on
-// (titoAtBooth) AND (goatLoose || chiefDistracted); chiefDistracted lights up
-// once Puzzle 2 lands. Until then the entry only requires the wheel turning.
+// -- Puzzle 2: The Tied Trash Bag (BITE) --
+// Family lunch leftovers were cleaned up into a wood-slat trash can on the
+// south edge of the Picnic Area, right where it overlooks Chief Withers'
+// patrol path. Bite the tied bag and the fragrant pile of food trash spills
+// across the corridor below. The Chief catches a whiff, blames the BBQ
+// vendor, and stomps off south toward the BBQ Pit yelling — never to
+// patrol again. Pre-solve, walking into the Chief's sight cone is a soft
+// fail (same teleport-back-to-paddock as AC).
+// Blanket is offset down toward the south edge of the picnic so the
+// landmark's "Picnic Area" label stays visible above it.
+const PICNIC_BLANKET_TILE   = [23, 4];
+const PICNIC_BLANKET_PX     = (PICNIC_BLANKET_TILE[0] + 0.5) * TILE;
+const PICNIC_BLANKET_PY     = (PICNIC_BLANKET_TILE[1] + 0.5) * TILE;
+const PICNIC_BLANKET_REACH  = 32;
+const TRASH_CAN_TILE        = [25, 4];     // south edge of the picnic
+const TRASH_CAN_PX          = (TRASH_CAN_TILE[0] + 0.5) * TILE;
+const TRASH_CAN_PY          = (TRASH_CAN_TILE[1] + 1.0) * TILE;
+const TRASH_REACH           = 36;
+// Chief patrols east-west on the open corridor immediately south of the
+// Picnic Area / Restrooms — between the upper landmarks and the rides row.
+// This is the natural west-bound path the pup walks from spawn, so the
+// Chief stands directly between the pup and either Tito or the Picnic.
+const CHIEF_PATROL_LEFT     = 13 * TILE;
+const CHIEF_PATROL_RIGHT    = 28 * TILE;
+const CHIEF_PATROL_Y        =  8 * TILE;
+const CHIEF_SPEED           = 0.55;
+const CHIEF_STOMP_SPEED     = 1.3;
+const CHIEF_SIGHT_RADIUS    = 90;
+const CHIEF_SIGHT_HALF_ANGLE = Math.PI / 3;   // ±60° forward fan, like AC
+// Once distracted, the Chief stomps toward the BBQ Pit (tile 13–17, 20–22)
+// and stays there yelling. To avoid visually walking through the ride
+// buildings, he routes via a waypoint in the gap between the Tilt-A-Whirl
+// and Bumper Cars (x≈656) at the central east-west corridor (y≈592), then
+// turns west to the BBQ. Same pattern Tito uses on his way to the booth.
+const CHIEF_STOMP_WAYPOINTS = [
+  [20.5, 18.5],   // gap between Tilt-A-Whirl and Bumper Cars, on central path
+  [15.0, 18.5],   // central corridor, west toward BBQ
+  [15.0, 19.0],   // arrive just north of BBQ Pit, hands on hips
+];
 let chiefDistracted = false;
+let trashSpilled    = false;
+let chiefState      = "patrol";   // "patrol" | "stomping" | "atBBQ"
+let chiefX          = (CHIEF_PATROL_LEFT + CHIEF_PATROL_RIGHT) / 2;
+let chiefY          = CHIEF_PATROL_Y;
+let chiefDir        = 1;          // +1 east, -1 west
+let chiefT          = 0;
+let chiefWaypoint   = 0;          // index into CHIEF_STOMP_WAYPOINTS
+// Verbs the player has tried at the trash can / blanket — for honest
+// HUD nudges, mirroring the Tito-bench and Petting-Zoo patterns.
+let trashSniffed    = false;
+let trashBarkTried  = false;
+let trashDigTried   = false;
 
 // -- Puzzle 1: The Loose Goat (BARK) --
 // A grumpy black-and-white goat is penned inside the south face of the
@@ -1903,6 +1951,25 @@ function hotMessageFor(crumbId) {
 }
 
 function doOverworldSniff() {
+  // Puzzle 2: trash can sniff overrides the picnic HOT breadcrumb (which is
+  // anchored to the blanket). Pre-solve it gives the "Chief will never be
+  // able to walk past this" hint; post-solve it just smells like ripe trash.
+  if (pupNearTrashCan()) {
+    trashSniffed = true;
+    if (!trashSpilled) {
+      setActionMessage(
+        pupName + " sniffs the trash can — funnel cake, hot dog ends, " +
+        "pickle, BBQ sauce. Chief Withers will never be able to walk " +
+        "past this if it ever got loose.", 360);
+    } else {
+      setActionMessage(
+        pupName + " sniffs the spilled pile — it smells exactly as " +
+        "advertised. Across the corridor, the Chief is still yelling at " +
+        "the BBQ Pit about it.", 280);
+    }
+    return;
+  }
+
   // Priority: breadcrumbs override everything (the family smell is the loudest
   // thing around). Then individual strangers. Then ambient zone.
   let { band, crumbId } = scentBandHere();
@@ -2000,6 +2067,15 @@ function doOverworldBark() {
       "wings — but the goat doesn't even look up.", 240);
     return;
   }
+  // Puzzle 2: bark at the picnic — pigeons explode off the tables, no
+  // mechanical effect. Just a satisfying small payoff for trying.
+  if (pupAtPicnicBlanket() || pupNearTrashCan() || pupAtPicnicSouthEdge()) {
+    trashBarkTried = true;
+    setActionMessage(
+      pupName + " BARKS! A dozen pigeons explode off the picnic tables in " +
+      "a panicked clatter. The bag is still tied. Nothing else stirs.", 240);
+    return;
+  }
   let np = nearestPerson();
   if (np && np.distance < PERSON_REACH) {
     let r = random();
@@ -2052,6 +2128,26 @@ function doOverworldBite() {
       "tastes like splinters and disappointment.", 240);
     return;
   }
+  // Puzzle 2: bite the tied bag at the trash can — solves it.
+  if (pupNearTrashCan() && !trashSpilled) {
+    triggerChiefDistraction();
+    setActionMessage(
+      pupName + " bites the twist on the trash bag. *RIIIP* — the bag " +
+      "splits, the can gapes open, and a fragrant pile of funnel cake, hot " +
+      "dog ends, and pickle spills across the corridor below. Two seconds " +
+      "later Chief Withers rounds the corner, sniffs once, BELLOWS \"WHO " +
+      "IS RUNNING A FILTHY OPERATION? IS THIS THE BBQ VENDOR AGAIN?\" and " +
+      "stomps off toward the BBQ Pit, clipboard waving.", 600);
+    return;
+  }
+  // Puzzle 2: bite anywhere else on the picnic blanket / south edge — flavor.
+  if (pupAtPicnicBlanket()) {
+    setActionMessage(
+      pupName + " gnaws the corner of the family's blanket. *crunch* — " +
+      "just rumples it. The funnel cake on the plate is far too crumbly to " +
+      "carry off in any meaningful way.", 280);
+    return;
+  }
   let np = nearestPerson();
   if (np && np.distance < PERSON_REACH) {
     returnToPaddock(
@@ -2083,6 +2179,15 @@ function doOverworldDig() {
       pupName + " digs along the fence and uncovers a stash of stubby, " +
       "kid-sized carrots — pocketed by some petting-zoo visitor and forgotten. " +
       "*chomp* Cute, but the goat is unimpressed.", 280);
+    return;
+  }
+  // Puzzle 2: dig in the soft picnic-area lawn — squirrel scolds.
+  if (pupAtPicnicBlanket() || pupAtPicnicSouthEdge()) {
+    trashDigTried = true;
+    setActionMessage(
+      pupName + " kicks up a shallow hole in the soft picnic-area lawn. " +
+      "A squirrel up in the tree chitters down at the pup, indignant. No " +
+      "buried prize.", 260);
     return;
   }
   if (random() < 0.20) {
@@ -2919,6 +3024,293 @@ function drawAnimalControl(x, y, walking) {
   pop();
 }
 
+// Chief Withers — stern administrator in a navy blazer, white shirt, red
+// tie, and rimmed glasses. Permanent clipboard tucked under the right arm.
+// Distinct silhouette from Animal Control (no peaked cap, suit instead of
+// uniform) so the player can tell the two patrols apart from a screen away.
+function drawChief(x, y, walking, yelling) {
+  let s = 1.05;
+  push();
+  translate(x, y);
+  if (chiefDir < 0) scale(-1, 1);
+  noStroke();
+  // Shadow
+  fill(0, 0, 0, 80);
+  ellipse(0, 18 * s, 22 * s, 5 * s);
+  // Legs (gray slacks)
+  let stepF = walking ? sin(chiefT * 6) * 1.6 * s : 0;
+  fill(60, 60, 70);
+  rect(-3 * s, 0, 2.5 * s, 14 * s + stepF, 1);
+  rect(0.6 * s, 0, 2.5 * s, 14 * s - stepF, 1);
+  // Dress shoes
+  fill(25, 20, 18);
+  rect(-3.5 * s, 13 * s + stepF, 3.4 * s, 3 * s, 1);
+  rect( 0.4 * s, 13 * s - stepF, 3.4 * s, 3 * s, 1);
+  // Body — navy blazer over white shirt
+  fill(40,  55,  90);
+  rect(-5.5 * s, -16 * s, 11 * s, 18 * s, 2);
+  // White shirt strip down the middle
+  fill(245, 245, 240);
+  rect(-1.2 * s, -16 * s, 2.5 * s, 14 * s);
+  // Red tie
+  fill(180, 40, 40);
+  triangle( 0,        -16 * s,
+           -1.5 * s,  -10 * s,
+            1.5 * s,  -10 * s);
+  rect(-1.0 * s, -10 * s, 2.0 * s, 5 * s);
+  // Lapels (slightly darker than blazer)
+  fill(28, 38, 65);
+  triangle(-5.5 * s, -16 * s, -1.3 * s, -16 * s, -1.3 * s, -10 * s);
+  triangle( 5.5 * s, -16 * s,  1.3 * s, -16 * s,  1.3 * s, -10 * s);
+  // Arms (blazer sleeves)
+  fill(40, 55, 90);
+  let armSwing = walking ? sin(chiefT * 6) * 1.0 * s : 0;
+  rect(-7.5 * s, -14 * s + armSwing, 2 * s, 12 * s, 1);
+  rect( 5.5 * s, -14 * s - armSwing, 2 * s, 12 * s, 1);
+  // Hands (skin)
+  fill(225, 200, 180);
+  ellipse(-6.5 * s, -2 * s + armSwing, 2.5 * s, 2.5 * s);
+  ellipse( 6.5 * s, -2 * s - armSwing, 2.5 * s, 2.5 * s);
+  // Head
+  fill(225, 200, 180);
+  ellipse(0, -22 * s, 9 * s, 10 * s);
+  // Comb-over: thin gray hair on top, balding crown
+  fill(160, 155, 150);
+  arc(0, -25 * s, 9 * s, 5 * s, PI, TWO_PI);
+  rect(-3.5 * s, -25 * s, 7 * s, 1.2 * s);
+  // Glasses — two small rims joined by a bridge
+  stroke(30, 30, 35);
+  strokeWeight(0.8);
+  noFill();
+  ellipse(-2.4 * s, -22 * s, 3 * s, 2.2 * s);
+  ellipse( 2.4 * s, -22 * s, 3 * s, 2.2 * s);
+  line(-1 * s, -22 * s, 1 * s, -22 * s);
+  noStroke();
+  // Mustache — neat administrative bristle
+  fill(110, 100, 90);
+  rect(-2.5 * s, -19 * s, 5 * s, 1.2 * s, 1);
+  // Clipboard tucked under the right arm
+  fill(220, 220, 230);
+  rect(5 * s, -2 * s, 6 * s, 8 * s, 1);
+  fill(60, 60, 70);
+  rect(5 * s, -2 * s, 6 * s, 1.5 * s);
+  // Yelling/angry overlay — small "!" emote bobs up while stomping/yelling
+  if (yelling) {
+    let bob = sin(chiefT * 4) * 1.2;
+    fill(220, 60, 50);
+    textAlign(CENTER, CENTER);
+    textSize(12);
+    text("!", -1 * s, -34 * s + bob);
+    text("!",  4 * s, -34 * s - bob);
+  }
+  pop();
+}
+
+// Chief sight cone — same translucent fan as AC, in a slightly different
+// hue so the two patrols read as distinct on screen. Hidden once he's
+// stomping off to the BBQ Pit.
+function drawChiefSightCone() {
+  if (chiefState !== "patrol") return;
+  push();
+  translate(chiefX, chiefY);
+  if (chiefDir < 0) scale(-1, 1);
+  noStroke();
+  fill(255, 180, 140, 60);
+  let r = CHIEF_SIGHT_RADIUS;
+  let a = CHIEF_SIGHT_HALF_ANGLE;
+  beginShape();
+  vertex(0, 0);
+  for (let t = -a; t <= a; t += 0.08) {
+    vertex(cos(t) * r, sin(t) * r);
+  }
+  endShape(CLOSE);
+  pop();
+}
+
+// Picnic decorations — checked blanket, juice box, half-eaten funnel cake
+// on a paper plate, and a wood-slat trash can on the south edge with a
+// fragrant tied-off bag. After the bite solve, the bag tears, the can
+// gapes open, and a scatter of food trash spills south onto the corridor
+// below — the bait that pulls Chief Withers off his patrol.
+function drawPicnicDecorations() {
+  // Checked blanket on the picnic.
+  let bx = PICNIC_BLANKET_PX;
+  let by = PICNIC_BLANKET_PY;
+  push();
+  noStroke();
+  // Drop shadow under the blanket.
+  fill(0, 0, 0, 50);
+  ellipse(bx, by + 8, 60, 18);
+  // Base blanket
+  fill(220, 80, 80);
+  rect(bx - 28, by - 14, 56, 28, 3);
+  // Checks
+  fill(245, 240, 230);
+  for (let cy = -14; cy < 14; cy += 8) {
+    for (let cx = -28; cx < 28; cx += 8) {
+      if (((cx + cy) / 8) % 2 === 0) {
+        rect(bx + cx, by + cy, 8, 8);
+      }
+    }
+  }
+  // Juice box (top-left of blanket)
+  fill(80, 140, 60);
+  rect(bx - 18, by - 8, 7, 9, 1);
+  fill(245, 245, 230);
+  rect(bx - 17, by - 7, 5, 2);
+  // Bendy straw
+  stroke(220, 60, 80);
+  strokeWeight(1);
+  line(bx - 14, by - 8, bx - 14, by - 13);
+  noStroke();
+  // Paper plate
+  fill(245, 245, 235);
+  ellipse(bx + 10, by + 2, 18, 14);
+  // Half-eaten funnel cake on the plate (curly golden lattice)
+  fill(220, 165,  80);
+  ellipse(bx + 10, by + 1, 14, 10);
+  fill(255, 230, 180);
+  for (let i = 0; i < 5; i++) {
+    let a = i * 0.7;
+    ellipse(bx + 10 + cos(a) * 4, by + 1 + sin(a) * 2.5, 2, 2);
+  }
+  // Powdered-sugar dusting
+  fill(255, 255, 255, 200);
+  ellipse(bx + 9, by - 1, 10, 6);
+  pop();
+
+  // Trash can on the south edge of the picnic.
+  drawTrashCan(TRASH_CAN_PX, TRASH_CAN_PY);
+
+  // Spill trail (only after the bite solve) — drawn over the corridor
+  // immediately south of the can.
+  if (trashSpilled) {
+    drawTrashSpill(TRASH_CAN_PX, TRASH_CAN_PY);
+  }
+}
+
+function drawTrashCan(x, y) {
+  push();
+  translate(x, y);
+  noStroke();
+  // Shadow
+  fill(0, 0, 0, 70);
+  ellipse(0, 14, 28, 6);
+  // Barrel body — wood-slat vertical staves
+  fill(110, 75, 45);
+  rect(-12, -14, 24, 26, 2);
+  for (let i = -10; i <= 10; i += 5) {
+    fill(85, 55, 35, 180);
+    rect(i, -14, 1, 26);
+  }
+  // Iron hoops
+  fill(60, 45, 30);
+  rect(-13, -10, 26, 2);
+  rect(-13,   8, 26, 2);
+  // Rim
+  fill(140, 100, 60);
+  rect(-13, -16, 26, 3, 1);
+
+  if (!trashSpilled) {
+    // Tied bag — black plastic bulging up out of the rim, twist tied at top.
+    fill(40, 40, 50);
+    ellipse(0, -18, 22, 12);
+    rect(-11, -22, 22, 8, 2);
+    // Crinkles (highlight)
+    stroke(70, 70, 85);
+    strokeWeight(1);
+    line(-7, -19, -3, -23);
+    line( 4, -19,  7, -23);
+    noStroke();
+    // The twist
+    fill(30, 30, 40);
+    rect(-2, -28, 4, 8, 1);
+    // A whiff of stink line drifting up — small wavy stripe so the
+    // player gets the "this is fragrant" hint visually too.
+    stroke(180, 220, 180, 160);
+    strokeWeight(1);
+    noFill();
+    let t = frameCount * 0.04;
+    beginShape();
+    for (let dy = 0; dy < 18; dy += 3) {
+      vertex(sin(t + dy * 0.3) * 3, -32 - dy);
+    }
+    endShape();
+    noStroke();
+  } else {
+    // Bag torn, gaping open — dark interior visible.
+    fill(35, 35, 45);
+    ellipse(0, -16, 22, 10);
+    fill(20, 20, 28);
+    ellipse(0, -16, 16, 6);
+    // Tatters around the rim
+    fill(40, 40, 50);
+    triangle(-11, -18, -7, -22, -5, -18);
+    triangle( 11, -18,  7, -22,  5, -18);
+    triangle( -2, -18,  0, -24,  2, -18);
+  }
+  pop();
+}
+
+function drawTrashSpill(canX, canY) {
+  // Trash items spill south from the can, scattering across the corridor
+  // below the Picnic Area. Drawn as a static decoration once trashSpilled
+  // flips — same approach as the goat fence's post-release splinters.
+  push();
+  noStroke();
+  // Stained patch on the dirt
+  fill(140, 110,  60, 140);
+  ellipse(canX, canY + 28, 70, 36);
+  fill(120,  90,  40, 130);
+  ellipse(canX + 6, canY + 38, 40, 18);
+  // Loose food: hot dog ends, pickle slice, funnel cake bits, napkin.
+  // Hot dog bun
+  fill(210, 170, 110);
+  push();
+  translate(canX - 14, canY + 24);
+  rotate(-0.4);
+  rect(-7, -3, 14, 6, 3);
+  pop();
+  // Hot dog
+  fill(170,  85,  50);
+  push();
+  translate(canX - 12, canY + 22);
+  rotate(-0.3);
+  rect(-6, -2, 12, 4, 2);
+  pop();
+  // Pickle slice (green disc)
+  fill(120, 170,  90);
+  ellipse(canX + 8, canY + 26, 8, 8);
+  fill(160, 200, 110);
+  ellipse(canX + 8, canY + 26, 4, 4);
+  // Funnel cake fragments
+  fill(220, 165,  80);
+  ellipse(canX + 18, canY + 36, 10, 7);
+  ellipse(canX -  4, canY + 40, 9, 6);
+  fill(255, 230, 180);
+  ellipse(canX + 18, canY + 36, 5, 4);
+  // Crumpled napkin
+  fill(245, 245, 235);
+  push();
+  translate(canX + 16, canY + 22);
+  rotate(0.6);
+  rect(-5, -3, 10, 6, 1);
+  pop();
+  // Apple core (nibbled)
+  fill(230, 220, 200);
+  ellipse(canX + 2, canY + 32, 7, 4);
+  fill( 70,  50,  35);
+  rect(canX + 1, canY + 28, 2, 3);
+  // A few flies buzzing — small dark dots circling the spill
+  fill(40, 40, 50);
+  let t = frameCount * 0.18;
+  for (let i = 0; i < 3; i++) {
+    let a = t + i * 2.1;
+    ellipse(canX + cos(a) * 18, canY + 30 + sin(a * 1.3) * 6, 1.5, 1.5);
+  }
+  pop();
+}
+
 // AC sight cone — translucent yellow fan in front of the officer while he
 // patrols. Goes away the moment he's chasing the goat. Lets the player see
 // what they need to slip around.
@@ -3141,6 +3533,106 @@ function updateAnimalControl() {
     acY += (dy / d) * AC_CHASE_SPEED;
     if (Math.abs(dx) > Math.abs(dy)) acPatrolDir = dx > 0 ? 1 : -1;
   }
+}
+
+// ---- Puzzle 2 helpers --------------------------------------------------
+function picnicLandmark() {
+  for (const lm of landmarks) {
+    if (lm.label === "Picnic Area") return lm;
+  }
+  return null;
+}
+
+function pupNearTrashCan() {
+  return dist(pup.x, pup.y, TRASH_CAN_PX, TRASH_CAN_PY) < TRASH_REACH;
+}
+
+function pupAtPicnicBlanket() {
+  return dist(pup.x, pup.y, PICNIC_BLANKET_PX, PICNIC_BLANKET_PY)
+         < PICNIC_BLANKET_REACH;
+}
+
+// Pup is within the strip of fairway directly below the Picnic Area, i.e.
+// inside the spill zone after the trash bag tears. Used so bark/dig flavor
+// at the picnic edge can tell the player they're "at the picnic," even when
+// they're not pressed up against the trash can or the blanket specifically.
+function pupAtPicnicSouthEdge() {
+  let lm = picnicLandmark();
+  if (!lm) return false;
+  let lx = lm.x * TILE;
+  let lw = lm.w * TILE;
+  let southY = (lm.y + lm.h) * TILE;
+  return pup.x > lx - 6 && pup.x < lx + lw + 6 &&
+         pup.y > southY - 6 && pup.y < southY + 50;
+}
+
+function triggerChiefDistraction() {
+  trashSpilled    = true;
+  chiefDistracted = true;
+  chiefState      = "stomping";
+}
+
+function pupInChiefSightCone() {
+  if (chiefState !== "patrol") return false;
+  let dx = pup.x - chiefX;
+  let dy = pup.y - chiefY;
+  let d  = Math.hypot(dx, dy);
+  if (d > CHIEF_SIGHT_RADIUS) return false;
+  if (d < 12) return true;
+  let forwardAngle = chiefDir > 0 ? 0 : PI;
+  let angle = Math.atan2(dy, dx);
+  let diff  = angle - forwardAngle;
+  while (diff >  PI) diff -= TWO_PI;
+  while (diff < -PI) diff += TWO_PI;
+  return Math.abs(diff) < CHIEF_SIGHT_HALF_ANGLE;
+}
+
+function updateChief() {
+  chiefT += 0.06;
+
+  if (chiefState === "patrol") {
+    chiefX += CHIEF_SPEED * chiefDir;
+    if (chiefX >= CHIEF_PATROL_RIGHT) {
+      chiefX = CHIEF_PATROL_RIGHT;
+      chiefDir = -1;
+    }
+    if (chiefX <= CHIEF_PATROL_LEFT) {
+      chiefX = CHIEF_PATROL_LEFT;
+      chiefDir =  1;
+    }
+    if (pupInChiefSightCone()) {
+      returnToPaddock(
+        "\"WHAT IS THIS! A LOOSE DOG!\" Chief Withers slaps his clipboard, " +
+        "marches " + pupName + " back to the holding pen, and mutters about " +
+        "fining the family. (Try again — and stay out of his sight line.)");
+    }
+    return;
+  }
+
+  if (chiefState === "stomping") {
+    if (chiefWaypoint >= CHIEF_STOMP_WAYPOINTS.length) {
+      chiefState = "atBBQ";
+      return;
+    }
+    let wp = CHIEF_STOMP_WAYPOINTS[chiefWaypoint];
+    let tx = wp[0] * TILE;
+    let ty = wp[1] * TILE;
+    let dx = tx - chiefX;
+    let dy = ty - chiefY;
+    let d  = Math.hypot(dx, dy);
+    if (d < CHIEF_STOMP_SPEED) {
+      chiefX = tx;
+      chiefY = ty;
+      chiefWaypoint++;
+      return;
+    }
+    chiefX += (dx / d) * CHIEF_STOMP_SPEED;
+    chiefY += (dy / d) * CHIEF_STOMP_SPEED;
+    if (Math.abs(dx) > Math.abs(dy)) chiefDir = dx > 0 ? 1 : -1;
+    return;
+  }
+
+  // chiefState === "atBBQ" — Chief stands at the BBQ Pit yelling. No-op.
 }
 
 // ---- Puzzle 5 helpers --------------------------------------------------
@@ -3678,6 +4170,7 @@ function updateMap() {
   updateGoat();
   updateTeen();
   updateAnimalControl();
+  updateChief();
   checkOperatorDiscovery();
   if (wheelTurning) wheelAngle += 0.02;
 
@@ -3726,8 +4219,11 @@ function updateMap() {
   camY = constrain(pup.y - height / 2, 0, MAP_H - height);
 
   // Walk into the south face of the Ferris Wheel while the wheel is turning
-  // and the camera takes over for the endgame.
-  if (!endgameEntered && wheelTurning && pupAtFerrisBase()) {
+  // and at least one cross-map patrol is cleared. Per the puzzle dependency
+  // chart, the player needs P1 OR P2 done to "safely cross to the west side"
+  // — the gate enforces that even if the player physically sneaked through.
+  if (!endgameEntered && wheelTurning &&
+      (goatLoose || chiefDistracted) && pupAtFerrisBase()) {
     enterFerrisEndgame();
   }
 }
@@ -3768,9 +4264,14 @@ function drawMap() {
     drawGoat(goatX, goatY, 0.95, 1, false, headbutt);
   }
   drawPettingZooSouthFence();
-  // AC sight cone — drawn under the entity layer so the officer sprite
-  // and any people drift across the top of it cleanly.
+  // Picnic decorations — blanket, juice box, funnel cake, the trash can,
+  // and the spill once Puzzle 2 is solved. Drawn over the landmark and
+  // under the entity layer so people walk in front of everything.
+  drawPicnicDecorations();
+  // Patrol sight cones — drawn under the entity layer so the officer
+  // sprites and any people drift across the top of them cleanly.
   drawACSightCone();
+  drawChiefSightCone();
 
   // Y-sorted entity layer. Each entity (pup or person) is drawn as one
   // complete unit (its own push/pop), and entities are sorted by foot Y
@@ -3800,6 +4301,9 @@ function drawMap() {
   // Animal Control officer — always present, pacing food row pre-solve and
   // chasing the goat post-solve.
   entities.push({ y: acY + 16, kind: "ac" });
+  // Chief Withers — patrolling the corridor north of the rides pre-solve,
+  // stomping toward the BBQ Pit / standing at it post-solve.
+  entities.push({ y: chiefY + 16, kind: "chief" });
   // Bored attendant teen at the gate (or chasing post-release).
   entities.push({ y: teenY + 14, kind: "teen" });
   // Goat once he's broken out of the pen — y-sorted so the pup can pass in
@@ -3834,6 +4338,10 @@ function drawMap() {
     } else if (e.kind === "ac") {
       let walking = acState === "patrol" || acState === "chasingGoat";
       drawAnimalControl(acX, acY, walking);
+    } else if (e.kind === "chief") {
+      let walking = chiefState === "patrol" || chiefState === "stomping";
+      let yelling = chiefState === "stomping" || chiefState === "atBBQ";
+      drawChief(chiefX, chiefY, walking, yelling);
     } else if (e.kind === "teen") {
       drawAttendantTeen(teenX, teenY, teenDir);
     } else if (e.kind === "goat") {
@@ -3969,6 +4477,32 @@ function drawMapHUD() {
             tried.charAt(0).toUpperCase() + tried.slice(1) +
             " didn't help — what would actually get him to charge?";
     }
+  } else if ((pupAtPicnicBlanket() || pupNearTrashCan() ||
+              pupAtPicnicSouthEdge()) && !trashSpilled) {
+    // Puzzle 2 nudge — fires when the pup is at the Picnic Area / trash
+    // can with the bag still tied. Names the wrong verbs the player has
+    // already tried so the hint stays honest.
+    let triedBits = [];
+    if (trashBarkTried) triedBits.push("barking");
+    if (trashDigTried)  triedBits.push("digging");
+    if (triedBits.length === 0) {
+      msg = "The family's blanket is right here, and the trash can is " +
+            "stuffed with the leftovers of their lunch. Chief Withers is " +
+            "pacing the corridor below. What does " + pupName + " do?";
+    } else {
+      let tried = triedBits.length === 2
+        ? triedBits[0] + " and " + triedBits[1]
+        : triedBits[0];
+      msg = "The bag's still tied. " +
+            tried.charAt(0).toUpperCase() + tried.slice(1) +
+            " didn't spill it — what would actually tear it open?";
+    }
+  } else if (chiefDistracted && goatState === "loose") {
+    msg = "Animal Control is chasing the goat across the south. Chief " +
+          "Withers is over at the BBQ Pit. Both corridors west are clear.";
+  } else if (chiefDistracted) {
+    msg = "Chief Withers is over at the BBQ Pit, yelling about the spill. " +
+          "The corridor north of the rides is clear.";
   } else if (goatState === "loose") {
     msg = "Animal Control is across the south of the map chasing the " +
           "loose goat. The food-stall row is clear.";
