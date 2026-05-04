@@ -1,0 +1,1169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pivtis</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      background: #111;
+      color: white;
+      font-family: system-ui, sans-serif;
+    }
+
+    .game-wrap {
+      display: flex;
+      align-items: flex-start;
+      gap: 24px;
+    }
+
+    .instructions {
+      width: 220px;
+      line-height: 1.35;
+      color: #ddd;
+      font-size: 14px;
+    }
+
+    .instructions h1 {
+      margin: 0 0 12px;
+      color: white;
+      font-size: 22px;
+    }
+
+    .instructions p {
+      margin: 0 0 10px;
+    }
+
+    .instructions strong {
+      color: white;
+    }
+
+    canvas {
+      background: #141414;
+      border: 1px solid #444;
+    }
+
+    .sound-button,
+    .replay-button {
+      margin-top: 10px;
+      padding: 8px 12px;
+      border: 0;
+      border-radius: 8px;
+      background: white;
+      color: #111;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .sound-button {
+      display: inline-block;
+      margin-right: 8px;
+    }
+
+    .replay-button {
+      display: none;
+    }
+
+    .replay-button.visible {
+      display: inline-block;
+    }
+  </style>
+</head>
+<body>
+<div class="game-wrap">
+  <div class="instructions">
+    <h1>Pivtis</h1>
+    <p>Move the falling piece left and right. Press space to rotate. Hold down arrow to drop faster.</p>
+    <p>When one colored block lands, the white pivot can rotate the piece.</p>
+    <p>When the piece settles, the white pivot disappears and the colored blocks fall.</p>
+    <p>Clear groups of <strong>4 or more</strong> touching blocks of the same color.</p>
+    <p>After a clear, blocks fall. Then reach-lines can connect same-color blocks across empty horizontal space.</p>
+    <p>Blocks score 1 point each. Chains multiply fast: 1x, 5x, 10x, 20x.</p>
+    <p>The speed is based on how many blocks are on screen, and the base speed also increases every 10 drops.</p>
+    <p>Music starts after your first keypress and intensifies as the speed rises.</p>
+    <button id="soundButton" class="sound-button">Sound: On</button>
+    <button id="replayButton" class="replay-button">Replay</button>
+  </div>
+
+  <canvas id="game"></canvas>
+</div>
+
+<script>
+var COLS = 11;
+var ROWS = 17;
+var CELL = 30;
+var HUD_H = 64;
+var PIECE_W = 3;
+
+var BLINK_DURATION = 1000;
+var BLINK_INTERVAL = 150;
+var CLEAR_MESSAGE_DURATION = 500;
+var LINE_ANIMATION_DURATION = 350;
+var LINE_DOT_RADIUS = 5;
+var LINE_CHECK_DURATION = 700;
+
+var BLOCK_COLORS = ["#E69F00", "#56B4E9", "#009E73", "#CC79A7"];
+
+var START_FALL_DELAY = 30;
+var MAX_FALL_SPEED = 6;
+var SPEED_FROM_FILL_AMOUNT = 5;
+var BASE_SPEED_UP_EVERY_DROPS = 10;
+var BASE_SPEED_UP_AMOUNT = 0.25;
+var FAST_DROP_MULTIPLIER = 10;
+
+var canvas = document.getElementById("game");
+var ctx = canvas.getContext("2d");
+var replayButton = document.getElementById("replayButton");
+var soundButton = document.getElementById("soundButton");
+
+canvas.width = COLS * CELL;
+canvas.height = ROWS * CELL + HUD_H;
+
+var piece = null;
+var landedBlocks = [];
+var fallTimer = 0;
+var fallDelay = START_FALL_DELAY;
+var fallSpeed = 1;
+var fastDrop = false;
+var piecesDropped = 0;
+var blocksCleared = 0;
+var currentDropRemoved = 0;
+var currentDropScore = 0;
+var chainMultiplier = 1;
+var blinkLineLength = 0;
+var score = 0;
+var resolvingDrop = false;
+var gameState = "playing";
+var blinkingBlocks = [];
+var blinkingBlockKeys = {};
+var blinkStartTime = 0;
+var clearMessageCount = 0;
+var clearMessageStartTime = 0;
+var gravityTimer = 0;
+var lineCheckStartTime = 0;
+var audioCtx = null;
+var soundOn = true;
+var musicStep = 0;
+var lastMusicTime = 0;
+var MUSIC_NOTES = [220, 277, 330, 415];
+
+function setup() {
+  resetGame();
+  replayButton.addEventListener("click", resetGame);
+  replayButton.addEventListener("click", initAudio);
+  soundButton.addEventListener("click", toggleSound);
+  requestAnimationFrame(draw);
+}
+
+function resetGame() {
+  piece = null;
+  landedBlocks = [];
+  fallTimer = 0;
+  fallDelay = START_FALL_DELAY;
+  fallSpeed = 1;
+  fastDrop = false;
+  piecesDropped = 0;
+  blocksCleared = 0;
+  currentDropRemoved = 0;
+  currentDropScore = 0;
+  chainMultiplier = 1;
+  blinkLineLength = 0;
+  score = 0;
+  resolvingDrop = false;
+  gameState = "playing";
+  blinkingBlocks = [];
+  blinkingBlockKeys = {};
+  blinkStartTime = 0;
+  clearMessageCount = 0;
+  clearMessageStartTime = 0;
+  gravityTimer = 0;
+  lineCheckStartTime = 0;
+  musicStep = 0;
+  lastMusicTime = 0;
+  updateSoundButton();
+  replayButton.classList.remove("visible");
+  spawnPiece();
+}
+
+function toggleSound() {
+  soundOn = !soundOn;
+
+  if (soundOn) {
+    initAudio();
+  }
+
+  updateSoundButton();
+}
+
+function updateSoundButton() {
+  soundButton.textContent = soundOn ? "Sound: On" : "Sound: Off";
+}
+
+function initAudio() {
+  if (!audioCtx) {
+    var AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (AudioContextClass) {
+      audioCtx = new AudioContextClass();
+    }
+  }
+
+  if (audioCtx && audioCtx.state === "suspended") {
+    audioCtx.resume();
+  }
+}
+
+function playTone(frequency, duration, type, volume) {
+  if (!soundOn) return;
+  if (!audioCtx) return;
+
+  var oscillator = audioCtx.createOscillator();
+  var gain = audioCtx.createGain();
+  var now = audioCtx.currentTime;
+
+  oscillator.type = type || "sine";
+  oscillator.frequency.setValueAtTime(frequency, now);
+  gain.gain.setValueAtTime(volume || 0.08, now);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+  oscillator.connect(gain);
+  gain.connect(audioCtx.destination);
+  oscillator.start(now);
+  oscillator.stop(now + duration);
+}
+
+function playMoveSound() {
+  playTone(420, 0.04, "square", 0.025);
+}
+
+function playLandSound() {
+  playTone(120, 0.08, "triangle", 0.08);
+}
+
+function playRotateSound() {
+  playTone(620, 0.06, "triangle", 0.05);
+}
+
+function playClearSound(count) {
+  var comboLevel = getComboLevel();
+  var base = 480 + comboLevel * 90;
+  var volume = Math.min(0.12, 0.055 + comboLevel * 0.012);
+
+  playTone(base + count * 8, 0.10, "sine", volume);
+  setTimeout(function() {
+    playTone(base + 160 + count * 6, 0.12, "sine", volume * 0.9);
+  }, 70);
+  setTimeout(function() {
+    playTone(base + 320 + count * 4, 0.14, "triangle", volume * 0.8);
+  }, 140);
+}
+
+function getComboLevel() {
+  if (chainMultiplier === 1) return 0;
+  if (chainMultiplier === 5) return 1;
+  if (chainMultiplier === 10) return 2;
+  if (chainMultiplier === 20) return 3;
+  return 4;
+}
+
+function updateMusic() {
+  if (!soundOn) return;
+  if (!audioCtx) return;
+  if (gameState === "gameOver") return;
+
+  var now = Date.now();
+  var interval = Math.max(130, 620 - fallSpeed * 80);
+
+  if (now - lastMusicTime < interval) return;
+
+  lastMusicTime = now;
+  playMusicNote();
+}
+
+function playMusicNote() {
+  var comboBump = getComboLevel() * 18;
+  var speedBump = Math.floor(fallSpeed * 12);
+  var note = MUSIC_NOTES[musicStep % MUSIC_NOTES.length] + comboBump + speedBump;
+  var volume = Math.min(0.07, 0.025 + fallSpeed * 0.006);
+
+  playTone(note, 0.08, "triangle", volume);
+
+  if (fallSpeed >= 3.5 && musicStep % 2 === 0) {
+    playTone(note * 2, 0.05, "sine", volume * 0.8);
+  }
+
+  musicStep += 1;
+}
+
+function playGameOverSound() {
+  playTone(220, 0.16, "sawtooth", 0.07);
+  setTimeout(function() {
+    playTone(150, 0.22, "sawtooth", 0.06);
+  }, 120);
+}
+
+function draw() {
+  drawBackground();
+  updateGameState();
+  drawGrid();
+  drawLandedBlocks();
+  drawReachLines();
+  drawPiece();
+  drawClearMessage();
+  drawGameOverMessage();
+  drawHud();
+  requestAnimationFrame(draw);
+}
+
+function spawnPiece() {
+  var pivotSlot = 1;
+  var squareColors = pickTwoDifferentColors();
+  var colors = [];
+  var colorIndex = 0;
+  var slot;
+
+  for (slot = 0; slot < PIECE_W; slot++) {
+    if (slot === pivotSlot) {
+      colors[slot] = "#ffffff";
+    } else {
+      colors[slot] = squareColors[colorIndex];
+      colorIndex += 1;
+    }
+  }
+
+  piece = {
+    pivotX: Math.floor(COLS / 2),
+    pivotY: 0,
+    pivotSlot: pivotSlot,
+    orientation: "horizontal",
+    colors: colors
+  };
+}
+
+function randomBlockColor() {
+  return BLOCK_COLORS[Math.floor(Math.random() * BLOCK_COLORS.length)];
+}
+
+function pickTwoDifferentColors() {
+  var first = randomBlockColor();
+  var choices = [];
+  var i;
+
+  for (i = 0; i < BLOCK_COLORS.length; i += 1) {
+    if (BLOCK_COLORS[i] !== first) {
+      choices.push(BLOCK_COLORS[i]);
+    }
+  }
+
+  return [first, choices[Math.floor(Math.random() * choices.length)]];
+}
+
+function updateGameState() {
+  if (gameState === "gameOver") return;
+
+  updateFallSpeed();
+  updateMusic();
+
+  if (gameState === "blinking") {
+    if (Date.now() - blinkStartTime >= BLINK_DURATION) {
+      finishBlinkRemoval();
+    }
+    return;
+  }
+
+  if (gameState === "gravity") {
+    gravityTimer += fallSpeed;
+
+    if (gravityTimer >= START_FALL_DELAY) {
+      gravityTimer = 0;
+
+      if (!stepGravityOnLandedBlocks()) {
+        startLineCheck();
+      }
+    }
+    return;
+  }
+
+  if (gameState === "lineCheck") {
+    if (Date.now() - lineCheckStartTime >= LINE_CHECK_DURATION) {
+      gameState = "playing";
+      resolveMatchesAndGravity(true);
+    }
+    return;
+  }
+
+  if (gameState === "clearMessage") {
+    if (Date.now() - clearMessageStartTime >= CLEAR_MESSAGE_DURATION) {
+      finishDropResolution();
+    }
+    return;
+  }
+
+  updatePiece();
+}
+
+function updatePiece() {
+  if (!piece) return;
+
+  fallTimer += fastDrop ? fallSpeed * FAST_DROP_MULTIPLIER : fallSpeed;
+
+  if (fallTimer < START_FALL_DELAY) return;
+  fallTimer = 0;
+
+  if (canMovePiece(0, 1)) {
+    piece.pivotY += 1;
+    return;
+  }
+
+  if (piece.orientation === "horizontal" && tryRotateOnPivotSupport()) {
+    playRotateSound();
+    return;
+  }
+
+  playLandSound();
+  piecesDropped += 1;
+  updateFallSpeed();
+  landPieceWithoutPivot();
+}
+
+function updateFallSpeed() {
+  var totalCells = COLS * ROWS;
+  var fillRatio = landedBlocks.length / totalCells;
+  var baseSpeedBonus = Math.floor(piecesDropped / BASE_SPEED_UP_EVERY_DROPS) * BASE_SPEED_UP_AMOUNT;
+
+  fallSpeed = Math.min(MAX_FALL_SPEED, 1 + baseSpeedBonus + fillRatio * SPEED_FROM_FILL_AMOUNT);
+  fallDelay = START_FALL_DELAY / fallSpeed;
+}
+
+function getPieceCells(testPiece) {
+  var cells = [];
+  var slot;
+
+  if (!testPiece) testPiece = piece;
+  if (!testPiece) return cells;
+
+  for (slot = 0; slot < PIECE_W; slot += 1) {
+    var offset = slot - testPiece.pivotSlot;
+    var x = testPiece.pivotX;
+    var y = testPiece.pivotY;
+
+    if (testPiece.orientation === "horizontal") {
+      x = testPiece.pivotX + offset;
+    } else if (testPiece.orientation === "reversed") {
+      x = testPiece.pivotX - offset;
+    } else if (testPiece.orientation === "left") {
+      y = testPiece.pivotY - offset;
+    } else if (testPiece.orientation === "right") {
+      y = testPiece.pivotY + offset;
+    }
+
+    cells.push({
+      x: x,
+      y: y,
+      slot: slot,
+      type: slot === testPiece.pivotSlot ? "pivot" : "square"
+    });
+  }
+
+  return cells;
+}
+
+function canMovePiece(dx, dy) {
+  var cells = getPieceCells();
+  var i;
+
+  for (i = 0; i < cells.length; i += 1) {
+    if (isBlocked(cells[i].x + dx, cells[i].y + dy)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function rotatePieceManually() {
+  var nextOrientation;
+  var rotated;
+
+  if (!piece) return false;
+
+  if (piece.orientation === "horizontal") {
+    nextOrientation = "right";
+  } else if (piece.orientation === "right") {
+    nextOrientation = "reversed";
+  } else if (piece.orientation === "reversed") {
+    nextOrientation = "left";
+  } else {
+    nextOrientation = "horizontal";
+  }
+
+  rotated = findValidRotatedPiece(nextOrientation);
+  if (!rotated) return false;
+
+  piece = rotated;
+  playRotateSound();
+  return true;
+}
+
+function tryRotateOnPivotSupport() {
+  var cells = getPieceCells();
+  var supportedSquares = [];
+  var i;
+  var hitSquare;
+  var orientation;
+  var rotated;
+
+  for (i = 0; i < cells.length; i += 1) {
+    if (cells[i].type === "square" && isBlocked(cells[i].x, cells[i].y + 1)) {
+      supportedSquares.push(cells[i]);
+    }
+  }
+
+  if (supportedSquares.length !== 1) return false;
+
+  hitSquare = supportedSquares[0];
+  orientation = hitSquare.x < piece.pivotX ? "right" : "left";
+  rotated = findValidRotatedPiece(orientation);
+
+  if (!rotated) return false;
+
+  piece = rotated;
+  return true;
+}
+
+function findValidRotatedPiece(orientation) {
+  var rotated;
+  var cells;
+  var i;
+
+  if (!piece) return null;
+
+  rotated = {
+    pivotX: piece.pivotX,
+    pivotY: piece.pivotY,
+    pivotSlot: piece.pivotSlot,
+    orientation: orientation,
+    colors: piece.colors
+  };
+
+  cells = getPieceCells(rotated);
+
+  for (i = 0; i < cells.length; i += 1) {
+    if (isBlocked(cells[i].x, cells[i].y)) {
+      return null;
+    }
+  }
+
+  return rotated;
+}
+
+function isBlocked(x, y) {
+  var i;
+
+  if (x < 0 || x >= COLS || y >= ROWS) return true;
+  if (y < 0) return false;
+
+  for (i = 0; i < landedBlocks.length; i += 1) {
+    if (landedBlocks[i].x === x && landedBlocks[i].y === y) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function landPieceWithoutPivot() {
+  var newBlocks = [];
+  var cells = getPieceCells();
+  var i;
+
+  for (i = 0; i < cells.length; i += 1) {
+    if (cells[i].type !== "pivot" && cells[i].y >= 0) {
+      newBlocks.push({
+        x: cells[i].x,
+        y: cells[i].y,
+        color: getCellColor(cells[i])
+      });
+    }
+  }
+
+  piece = null;
+  dropNewBlocks(newBlocks);
+
+  for (i = 0; i < newBlocks.length; i += 1) {
+    landedBlocks.push(newBlocks[i]);
+  }
+
+  currentDropRemoved = 0;
+  currentDropScore = 0;
+  chainMultiplier = 1;
+  resolvingDrop = true;
+  resolveMatchesAndGravity(false);
+}
+
+function startLineCheck() {
+  gameState = "lineCheck";
+  lineCheckStartTime = Date.now();
+  blinkStartTime = lineCheckStartTime;
+  blinkLineLength = COLS;
+}
+
+function resolveMatchesAndGravity(useLineConnections) {
+  var matchedBlocks;
+
+  useLineConnections = useLineConnections === true;
+  matchedBlocks = findMatchingGroups(useLineConnections);
+
+  if (matchedBlocks.length > 0) {
+    startBlinkingMatches(matchedBlocks);
+  } else if (resolvingDrop) {
+    if (currentDropRemoved > 0) {
+      startClearMessage();
+    } else {
+      finishDropResolution();
+    }
+  }
+}
+
+function startClearMessage() {
+  clearMessageCount = currentDropScore;
+  clearMessageStartTime = Date.now();
+  gameState = "clearMessage";
+}
+
+function finishDropResolution() {
+  score += currentDropScore;
+  currentDropRemoved = 0;
+  currentDropScore = 0;
+  chainMultiplier = 1;
+  resolvingDrop = false;
+
+  if (isGameOver()) {
+    endGame();
+  } else {
+    gameState = "playing";
+    spawnPiece();
+  }
+}
+
+function isGameOver() {
+  var i;
+
+  for (i = 0; i < landedBlocks.length; i += 1) {
+    if (landedBlocks[i].y <= 0) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function endGame() {
+  playGameOverSound();
+  gameState = "gameOver";
+  fastDrop = false;
+  replayButton.classList.add("visible");
+}
+
+function findMatchingGroups(useLineConnections) {
+  var grid = {};
+  var visited = {};
+  var removeKeys = {};
+  var matchedBlocks = [];
+  var i;
+  var block;
+  var startKey;
+  var group;
+  var j;
+
+  useLineConnections = useLineConnections === true;
+
+  for (i = 0; i < landedBlocks.length; i += 1) {
+    grid[landedBlocks[i].x + "," + landedBlocks[i].y] = landedBlocks[i];
+  }
+
+  for (i = 0; i < landedBlocks.length; i += 1) {
+    block = landedBlocks[i];
+    startKey = block.x + "," + block.y;
+
+    if (!visited[startKey]) {
+      group = findSameColorGroup(block, grid, visited, useLineConnections);
+
+      if (group.length >= 4) {
+        for (j = 0; j < group.length; j += 1) {
+          removeKeys[group[j].x + "," + group[j].y] = true;
+        }
+      }
+    }
+  }
+
+  for (i = 0; i < landedBlocks.length; i += 1) {
+    if (removeKeys[landedBlocks[i].x + "," + landedBlocks[i].y]) {
+      matchedBlocks.push(landedBlocks[i]);
+    }
+  }
+
+  return matchedBlocks;
+}
+
+function startBlinkingMatches(blocks) {
+  var i;
+
+  playClearSound(blocks.length);
+  gameState = "blinking";
+  blinkingBlocks = blocks;
+  blinkingBlockKeys = {};
+  blinkStartTime = Date.now();
+
+  for (i = 0; i < blinkingBlocks.length; i += 1) {
+    blinkingBlockKeys[blinkingBlocks[i].x + "," + blinkingBlocks[i].y] = true;
+  }
+}
+
+function finishBlinkRemoval() {
+  var keptBlocks = [];
+  var i;
+
+  for (i = 0; i < landedBlocks.length; i += 1) {
+    if (!blinkingBlockKeys[landedBlocks[i].x + "," + landedBlocks[i].y]) {
+      keptBlocks.push(landedBlocks[i]);
+    }
+  }
+
+  landedBlocks = keptBlocks;
+  blocksCleared += blinkingBlocks.length;
+  currentDropRemoved += blinkingBlocks.length;
+  currentDropScore += blinkingBlocks.length * chainMultiplier;
+  chainMultiplier = nextChainMultiplier(chainMultiplier);
+  blinkingBlocks = [];
+  blinkingBlockKeys = {};
+  gameState = "gravity";
+  gravityTimer = 0;
+}
+
+function nextChainMultiplier(currentMultiplier) {
+  if (currentMultiplier === 1) return 5;
+  return currentMultiplier * 2;
+}
+
+function findSameColorGroup(startBlock, grid, visited, useLineConnections) {
+  var group = [];
+  var queue = [startBlock];
+  var color = startBlock.color;
+  var block;
+  var key;
+
+  useLineConnections = useLineConnections === true;
+
+  while (queue.length > 0) {
+    block = queue.shift();
+    key = block.x + "," + block.y;
+
+    if (!visited[key]) {
+      visited[key] = true;
+      group.push(block);
+
+      if (useLineConnections) {
+        addLineNeighborToQueue(block, 1, color, grid, visited, queue);
+        addLineNeighborToQueue(block, -1, color, grid, visited, queue);
+      } else {
+        addNeighborToQueue(block.x + 1, block.y, color, grid, visited, queue);
+        addNeighborToQueue(block.x - 1, block.y, color, grid, visited, queue);
+      }
+
+      addNeighborToQueue(block.x, block.y + 1, color, grid, visited, queue);
+      addNeighborToQueue(block.x, block.y - 1, color, grid, visited, queue);
+    }
+  }
+
+  return group;
+}
+
+function addLineNeighborToQueue(block, dx, color, grid, visited, queue) {
+  var x = block.x + dx;
+  var y = block.y;
+  var key;
+  var neighbor;
+
+  while (x >= 0 && x < COLS) {
+    key = x + "," + y;
+    neighbor = grid[key];
+
+    if (neighbor) {
+      if (!visited[key] && neighbor.color === color) {
+        queue.push(neighbor);
+      }
+      return;
+    }
+
+    x += dx;
+  }
+}
+
+function addNeighborToQueue(x, y, color, grid, visited, queue) {
+  var key = x + "," + y;
+  var neighbor = grid[key];
+
+  if (neighbor && !visited[key] && neighbor.color === color) {
+    queue.push(neighbor);
+  }
+}
+
+function stepGravityOnLandedBlocks() {
+  var moved = false;
+  var movableBlocks = [];
+  var i;
+  var block;
+  var nextY;
+
+  for (i = 0; i < landedBlocks.length; i += 1) {
+    if (!landedBlocks[i].fixed) {
+      movableBlocks.push(landedBlocks[i]);
+    }
+  }
+
+  movableBlocks.sort(function(a, b) {
+    return b.y - a.y;
+  });
+
+  for (i = 0; i < movableBlocks.length; i += 1) {
+    block = movableBlocks[i];
+    nextY = block.y + 1;
+
+    if (nextY < ROWS && !isBlockedByOtherBlock(block, block.x, nextY)) {
+      block.y += 1;
+      moved = true;
+    }
+  }
+
+  return moved;
+}
+
+function isBlockedByOtherBlock(block, x, y) {
+  var i;
+
+  for (i = 0; i < landedBlocks.length; i += 1) {
+    if (landedBlocks[i] !== block && landedBlocks[i].x === x && landedBlocks[i].y === y) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function dropNewBlocks(newBlocks) {
+  var moved = true;
+  var i;
+
+  while (moved) {
+    moved = false;
+    newBlocks.sort(function(a, b) {
+      return b.y - a.y;
+    });
+
+    for (i = 0; i < newBlocks.length; i += 1) {
+      if (canDropNewBlock(newBlocks[i], newBlocks)) {
+        newBlocks[i].y += 1;
+        moved = true;
+      }
+    }
+  }
+}
+
+function canDropNewBlock(block, newBlocks) {
+  var nextY = block.y + 1;
+  var i;
+
+  if (nextY >= ROWS) return false;
+
+  for (i = 0; i < landedBlocks.length; i += 1) {
+    if (landedBlocks[i].x === block.x && landedBlocks[i].y === nextY) {
+      return false;
+    }
+  }
+
+  for (i = 0; i < newBlocks.length; i += 1) {
+    if (newBlocks[i] !== block && newBlocks[i].x === block.x && newBlocks[i].y === nextY) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function getCellColor(cell) {
+  if (!piece) return "#ffffff";
+  return piece.colors[cell.slot];
+}
+
+function drawBackground() {
+  ctx.fillStyle = "#141414";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+}
+
+function drawGrid() {
+  var x;
+  var y;
+
+  ctx.strokeStyle = "#373737";
+  ctx.lineWidth = 1;
+
+  for (x = 0; x <= COLS; x += 1) {
+    ctx.beginPath();
+    ctx.moveTo(x * CELL, 0);
+    ctx.lineTo(x * CELL, ROWS * CELL);
+    ctx.stroke();
+  }
+
+  for (y = 0; y <= ROWS; y += 1) {
+    ctx.beginPath();
+    ctx.moveTo(0, y * CELL);
+    ctx.lineTo(COLS * CELL, y * CELL);
+    ctx.stroke();
+  }
+}
+
+function drawLandedBlocks() {
+  var i;
+
+  for (i = 0; i < landedBlocks.length; i += 1) {
+    if (!shouldHideBlinkingBlock(landedBlocks[i])) {
+      ctx.fillStyle = landedBlocks[i].color;
+      roundRect(landedBlocks[i].x * CELL + 2, landedBlocks[i].y * CELL + 2, CELL - 4, CELL - 4, 4);
+    }
+  }
+}
+
+function drawReachLines() {
+  var i;
+
+  if (gameState !== "lineCheck") return;
+
+  for (i = 0; i < landedBlocks.length; i += 1) {
+    drawReachLinesForBlock(landedBlocks[i]);
+  }
+}
+
+function drawReachLinesForBlock(block) {
+  drawSingleReachLine(block, 1);
+  drawSingleReachLine(block, -1);
+}
+
+function drawSingleReachLine(block, dx) {
+  var startX = block.x * CELL + CELL / 2;
+  var startY = block.y * CELL + CELL / 2;
+  var targetX = startX;
+  var targetY = startY;
+  var drawX;
+  var drawY;
+  var step;
+  var tx;
+  var ty;
+  var extended = false;
+  var elapsed = Date.now() - blinkStartTime;
+  var progress = Math.min(1, elapsed / LINE_ANIMATION_DURATION);
+
+  for (step = 1; step <= blinkLineLength; step += 1) {
+    tx = block.x + dx * step;
+    ty = block.y;
+
+    if (!isInsideBoard(tx, ty)) break;
+    if (!isEmptyForReachLine(tx, ty)) break;
+
+    targetX = tx * CELL + CELL / 2;
+    targetY = ty * CELL + CELL / 2;
+    extended = true;
+  }
+
+  if (!extended) return;
+
+  drawX = startX + (targetX - startX) * progress;
+  drawY = startY + (targetY - startY) * progress;
+
+  ctx.strokeStyle = block.color;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(startX, startY);
+  ctx.lineTo(drawX, drawY);
+  ctx.stroke();
+
+  ctx.fillStyle = block.color;
+  ctx.beginPath();
+  ctx.arc(drawX, drawY, LINE_DOT_RADIUS, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function isInsideBoard(x, y) {
+  return x >= 0 && x < COLS && y >= 0 && y < ROWS;
+}
+
+function isEmptyForReachLine(x, y) {
+  var i;
+
+  for (i = 0; i < landedBlocks.length; i += 1) {
+    if (landedBlocks[i].x === x && landedBlocks[i].y === y) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function shouldHideBlinkingBlock(block) {
+  var key;
+  var elapsed;
+
+  if (gameState !== "blinking") return false;
+
+  key = block.x + "," + block.y;
+  if (!blinkingBlockKeys[key]) return false;
+
+  elapsed = Date.now() - blinkStartTime;
+  return Math.floor(elapsed / BLINK_INTERVAL) % 2 === 1;
+}
+
+function drawPiece() {
+  var cells;
+  var i;
+  var cell;
+  var x;
+  var y;
+
+  if (!piece || gameState === "gameOver") return;
+
+  cells = getPieceCells();
+
+  for (i = 0; i < cells.length; i += 1) {
+    cell = cells[i];
+    x = cell.x * CELL;
+    y = cell.y * CELL;
+
+    if (cell.y >= 0) {
+      if (cell.type === "pivot") {
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.arc(x + CELL / 2, y + CELL / 2, CELL / 2 - 3, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.fillStyle = getCellColor(cell);
+        roundRect(x + 2, y + 2, CELL - 4, CELL - 4, 4);
+      }
+    }
+  }
+}
+
+function drawClearMessage() {
+  var centerX;
+  var centerY;
+  var message;
+
+  if (gameState !== "clearMessage") return;
+
+  centerX = canvas.width / 2;
+  centerY = (ROWS * CELL) / 2;
+  message = clearMessageCount + " points";
+
+  ctx.fillStyle = "rgba(0, 0, 0, 0.65)";
+  roundRect(centerX - 115, centerY - 34, 230, 68, 12);
+
+  ctx.fillStyle = "white";
+  ctx.font = "24px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(message, centerX, centerY);
+}
+
+function drawGameOverMessage() {
+  var centerX;
+  var centerY;
+
+  if (gameState !== "gameOver") return;
+
+  centerX = canvas.width / 2;
+  centerY = (ROWS * CELL) / 2;
+
+  ctx.fillStyle = "rgba(0, 0, 0, 0.75)";
+  roundRect(centerX - 120, centerY - 48, 240, 96, 12);
+
+  ctx.fillStyle = "white";
+  ctx.font = "28px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("Game Over", centerX, centerY - 14);
+
+  ctx.font = "16px system-ui, sans-serif";
+  ctx.fillText("Score: " + score, centerX, centerY + 20);
+}
+
+function drawHud() {
+  var hudTop = ROWS * CELL;
+
+  ctx.fillStyle = "white";
+  ctx.textBaseline = "middle";
+
+  ctx.font = "16px system-ui, sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText("Dropped: " + piecesDropped + " | Score: " + score + " | Speed: " + fallSpeed.toFixed(2) + "x", 10, hudTop + 18);
+
+  ctx.font = "13px system-ui, sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText("Controls: left/right move | space rotate | down fast drop", 10, hudTop + 44);
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.fill();
+}
+
+window.addEventListener("keydown", function(event) {
+  if (soundOn) initAudio();
+
+  if (gameState !== "playing") {
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "ArrowDown" || event.code === "Space") {
+      event.preventDefault();
+    }
+    return;
+  }
+
+  if (event.key === "ArrowLeft" && canMovePiece(-1, 0)) {
+    piece.pivotX -= 1;
+    playMoveSound();
+  } else if (event.key === "ArrowRight" && canMovePiece(1, 0)) {
+    piece.pivotX += 1;
+    playMoveSound();
+  } else if (event.code === "Space") {
+    rotatePieceManually();
+  } else if (event.key === "ArrowDown") {
+    fastDrop = true;
+  }
+
+  if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "ArrowDown" || event.code === "Space") {
+    event.preventDefault();
+  }
+});
+
+window.addEventListener("keyup", function(event) {
+  if (event.key === "ArrowDown") {
+    fastDrop = false;
+    event.preventDefault();
+  }
+});
+
+setup();
+</script>
+</body>
+</html>
+
