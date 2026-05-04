@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Speed Word</title>
+</head>
+<body style="margin:0; background:#1c1c1c; color:white; font-family:Arial, sans-serif; overflow:hidden;">
+  <div id="game-wrap" style="width:100vw; height:100vh; margin:0; padding:0; position:relative;">
+    <canvas id="game-canvas" style="display:block; width:100vw; height:100vh; background:#1c1c1c;"></canvas>
+    <input
+      id="word-input"
+      type="text"
+      maxlength="7"
+      autocomplete="off"
+      spellcheck="false"
+      placeholder="Type a word and press Enter"
+      style="box-sizing:border-box; display:none; position:absolute; left:50%; top:330px; transform:translateX(-50%); width:min(700px, calc(100vw - 60px)); font-size:28px; padding:8px 14px; border-radius:10px; border:2px solid #777; background:#111; color:white; text-transform:uppercase; outline:none;"
+    />
+    <button
+      id="start-button"
+      type="button"
+      style="display:none; position:absolute; left:50%; top:330px; transform:translateX(-50%); font-size:28px; padding:10px 30px; border-radius:12px; border:2px solid #ddd; background:#f2f2f2; color:#111; cursor:pointer;"
+    >Start</button>
+    <button
+      id="discard-button"
+      type="button"
+      style="display:none; position:absolute; left:50%; top:395px; transform:translateX(-50%); font-size:18px; padding:8px 20px; border-radius:10px; border:2px solid #aaa; background:#333; color:white; cursor:pointer;"
+    >Discard Tiles</button>
+  </div>
+
+<script>
+(function () {
+  'use strict';
+
+  const WORD_URL = 'https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt';
+  const SHOW_DEBUG_LOG = false;
+  const STARTING_TILE_COUNT = 70;
+  const INTRO_MESSAGE = 'Make the highest scoring word you can in 30 seconds. The longer you take, the lower the score. Use the 7 tiles. 6-letter words +20. 7-letter words +50. Press Start.';
+
+  const letterScores = Object.freeze({
+    A: 1, B: 3, C: 3, D: 2, E: 1, F: 4, G: 2,
+    H: 4, I: 1, J: 8, K: 5, L: 1, M: 3, N: 1,
+    O: 1, P: 3, Q: 10, R: 1, S: 1, T: 1, U: 1,
+    V: 4, W: 4, X: 8, Y: 4, Z: 10
+  });
+
+  const fallbackWords = Object.freeze([
+    'AT', 'TO', 'IN', 'IT', 'IS', 'AS', 'AN', 'ON', 'NO', 'GO', 'DO', 'SO', 'UP', 'US', 'WE', 'HE', 'ME',
+    'CAT', 'DOG', 'RUN', 'WORD', 'WORDS', 'SPEED', 'GAME', 'PLAY', 'PLAYS', 'STAR', 'START', 'STONE', 'NOTE', 'NOTES',
+    'READ', 'ROAD', 'ROADS', 'TREE', 'TREES', 'FIRE', 'FIRES', 'WATER', 'LATER', 'RATE', 'RATES', 'TEAR', 'EAT', 'ATE', 'TEA'
+  ]);
+
+  const letterBag = 'EEEEEEEEEEEEAAAAAAAAAIIIIIIIIIOOOOOOOONNNNNNRRRRRRTTTTTLLLLSSSSUUUUDDDDGGGBBCCMMPPFFHHVVWWYYKJXQZ';
+
+  const canvas = document.getElementById('game-canvas');
+  const ctx = canvas.getContext('2d');
+  const wordInput = document.getElementById('word-input');
+  const startButton = document.getElementById('start-button');
+  const discardButton = document.getElementById('discard-button');
+
+  const state = {
+    rack: [],
+    typedWord: '',
+    score: 0,
+    roundStart: performance.now(),
+    loadingStartedAt: performance.now(),
+    message: 'Loading full dictionary...',
+    dictionary: new Set(),
+    dictionaryReady: false,
+    dictionaryFailed: false,
+    gameStarted: false,
+    phase: 'loading',
+    lastWord: '',
+    lastBase: 0,
+    lastMult: 1,
+    lastPoints: 0,
+    pendingUsedIndices: [],
+    gameOverReason: '',
+    tilePool: [],
+    tilesRemaining: 0,
+    debugLines: []
+  };
+
+  function setupGame() {
+    resizeCanvasToScreen();
+    window.addEventListener('resize', resizeCanvasToScreen);
+    runSelfTests();
+    setupInput();
+    setupStartButton();
+    setupDiscardButton();
+    loadDictionaryAsync();
+    requestAnimationFrame(loop);
+  }
+
+  function setupInput() {
+    wordInput.addEventListener('input', function () {
+      state.typedWord = sanitizeTypedWord(wordInput.value);
+      if (wordInput.value !== state.typedWord) wordInput.value = state.typedWord;
+
+      if (state.typedWord && !canMakeWordFromRack(state.typedWord, state.rack)) {
+        state.message = 'You can only use the visible rack letters.';
+      }
+    });
+
+    wordInput.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter') {
+        submitWord();
+        event.preventDefault();
+      }
+    });
+  }
+
+  function setupStartButton() {
+    startButton.addEventListener('click', function () {
+      if (state.phase === 'gameover') {
+        showStartScreen('New game. Press Start.');
+      } else {
+        beginRound();
+      }
+    });
+  }
+
+  function setupDiscardButton() {
+    discardButton.addEventListener('click', discardTiles);
+  }
+
+  async function loadDictionaryAsync() {
+    debugLog('fetch started');
+
+    try {
+      const res = await fetch(WORD_URL, { cache: 'force-cache' });
+      debugLog('fetch response: ' + res.status + ' ' + res.statusText);
+
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+
+      const text = await res.text();
+      debugLog('downloaded chars: ' + text.length);
+
+      const words = text
+        .split(String.fromCharCode(10))
+        .map(function (word) { return sanitizeDictionaryWord(word); })
+        .filter(function (word) {
+          return word.length >= 2 && word.length <= 7 && isOnlyLetters(word);
+        });
+
+      state.dictionary = new Set(words);
+      state.dictionaryReady = state.dictionary.size > 0;
+      state.dictionaryFailed = !state.dictionaryReady;
+
+      if (!state.dictionaryReady) throw new Error('Dictionary parsed to zero words');
+
+      debugLog('full dictionary size: ' + state.dictionary.size);
+      showStartScreen(INTRO_MESSAGE);
+    } catch (err) {
+      state.dictionary = new Set(fallbackWords);
+      state.dictionaryReady = true;
+      state.dictionaryFailed = true;
+      debugLog('dictionary fetch failed: ' + err.message);
+      debugLog('fallback dictionary size: ' + state.dictionary.size);
+      console.error('[Speed Word] dictionary fetch failed', err);
+      showStartScreen(INTRO_MESSAGE);
+    }
+  }
+
+  function showStartScreen(startMessage) {
+    state.rack = [];
+    state.typedWord = '';
+    state.roundStart = performance.now();
+    state.message = startMessage;
+    state.gameStarted = true;
+    state.phase = 'ready';
+    state.lastWord = '';
+    state.lastBase = 0;
+    state.lastMult = 1;
+    state.lastPoints = 0;
+    state.pendingUsedIndices = [];
+    state.gameOverReason = '';
+    state.score = 0;
+    state.tilePool = makeTilePool(STARTING_TILE_COUNT);
+    state.tilesRemaining = state.tilePool.length;
+
+    wordInput.value = '';
+    wordInput.style.display = 'none';
+    startButton.textContent = 'Start';
+    startButton.style.display = 'block';
+    discardButton.style.display = 'none';
+  }
+
+  function beginRound() {
+    removePendingUsedTiles();
+    fillRackToSeven();
+
+    if (!hasPlayableTiles()) {
+      showGameOver('Out of tiles.');
+      return;
+    }
+
+    state.typedWord = '';
+    state.roundStart = performance.now();
+    state.message = 'Go.';
+    state.phase = 'playing';
+
+    wordInput.value = '';
+    wordInput.style.display = 'block';
+    startButton.style.display = 'none';
+    discardButton.style.display = 'block';
+    wordInput.focus();
+  }
+
+  function showResultScreen(word, base, mult, points) {
+    state.lastWord = word;
+    state.lastBase = base;
+    state.lastMult = mult;
+    state.lastPoints = points;
+    state.typedWord = '';
+    state.phase = 'result';
+    state.message = word + ' scored ' + points + ' points.';
+
+    wordInput.value = '';
+    wordInput.style.display = 'none';
+    startButton.textContent = 'Next Word';
+    startButton.style.display = 'block';
+    discardButton.style.display = 'none';
+  }
+
+  function loop() {
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  function draw() {
+    ctx.fillStyle = 'rgb(28,28,28)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    if (!state.gameStarted) {
+      drawLoadingScreen();
+      return;
+    }
+
+    if (state.phase === 'ready') {
+      drawHeader(30, 3);
+      drawStartMessage();
+      return;
+    }
+
+    if (state.phase === 'result') {
+      drawHeader(30, 3);
+      drawRack();
+      drawResultMessage();
+      return;
+    }
+
+    if (state.phase === 'gameover') {
+      drawHeader(0, 1);
+      drawRack();
+      drawGameOverMessage();
+      return;
+    }
+
+    const elapsed = (performance.now() - state.roundStart) / 1000;
+    const timeLeft = Math.max(0, 30 - elapsed);
+    const mult = getMultiplier(elapsed);
+
+    if (elapsed >= 30) {
+      showGameOver('Time ran out.');
+      return;
+    }
+
+    drawHeader(timeLeft, mult);
+    drawRack();
+    drawCurrentWord(mult);
+    drawInstructions();
+
+    if (SHOW_DEBUG_LOG) drawDebugLog();
+  }
+
+  function resizeCanvasToScreen() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+
+  function uiCenterX() {
+    return canvas.width / 2;
+  }
+
+  function drawLoadingScreen() {
+    const elapsed = ((performance.now() - state.loadingStartedAt) / 1000).toFixed(1);
+    drawText('SPEED WORD', uiCenterX(), 120, 42, 'white');
+    drawText('Loading dictionary...', uiCenterX(), 210, 26, 'rgb(255,225,130)');
+    drawText('This can take a few seconds the first time.', uiCenterX(), 250, 16, 'rgb(210,210,210)');
+    drawText('Elapsed: ' + elapsed + 's', uiCenterX(), 285, 15, 'rgb(180,180,180)');
+    if (SHOW_DEBUG_LOG) drawDebugLog();
+  }
+
+  function drawHeader(timeLeft, mult) {
+    drawText('SPEED WORD', uiCenterX(), 42, 34, 'white');
+    drawText('Score: ' + state.score, 32, 42, 20, 'white', 'left');
+    drawText('Time: ' + timeLeft.toFixed(1), canvas.width - 32, 42, 20, 'white', 'right');
+    drawText('Tiles left: ' + state.tilesRemaining, 32, 75, 18, 'rgb(210,210,210)', 'left');
+    drawText('Multiplier: ' + mult + 'x', uiCenterX(), 88, 20, mult === 3 ? 'white' : 'rgb(210,210,210)');
+  }
+
+  function drawRack() {
+    const tileW = 50;
+    const gap = 20;
+    const totalW = 7 * tileW + 6 * gap;
+    const startX = uiCenterX() - totalW / 2;
+    const y = 130;
+    const used = getTypedLetterUsage();
+
+    for (let i = 0; i < 7; i++) {
+      const x = startX + i * (tileW + gap);
+      const tile = state.rack[i];
+      const letter = tile ? tile.letter : null;
+      const isUsed = used[i] === true || state.pendingUsedIndices.includes(i);
+      const hasLetter = Boolean(tile);
+
+      ctx.strokeStyle = hasLetter ? 'white' : 'rgb(90,90,90)';
+      ctx.lineWidth = 2;
+      ctx.fillStyle = hasLetter ? (isUsed ? 'rgb(95,95,95)' : getTileFillColor(tile)) : 'rgb(40,40,40)';
+      roundedRect(x, y, tileW, 60, 10);
+      ctx.fill();
+      ctx.stroke();
+
+      if (hasLetter) {
+        drawText(letter, x + tileW / 2, y + 26, 22, isUsed ? 'white' : 'rgb(20,20,20)');
+        drawText(String(tile.value), x + tileW - 12, y + 48, 11, isUsed ? 'white' : 'rgb(20,20,20)');
+      }
+    }
+  }
+
+  function drawStartMessage() {
+    drawText('SPEED WORD', uiCenterX(), 140, 28, 'white');
+    drawText('Make the highest scoring word you can in 30 seconds.', uiCenterX(), 185, 16, 'rgb(220,220,220)');
+    drawText('Use the 7 tiles. The longer you take, the lower the score.', uiCenterX(), 210, 16, 'rgb(220,220,220)');
+    drawText('6-letter words +20. 7-letter words +50.', uiCenterX(), 235, 16, 'rgb(220,220,220)');
+    drawText('Press Start to begin.', uiCenterX(), 265, 16, 'rgb(255,225,130)');
+  }
+
+  function drawResultMessage() {
+    drawText(state.lastWord, uiCenterX(), 230, 30, 'white');
+    const bonusText = (state.lastWord.length === 6 ? ' +20' : state.lastWord.length === 7 ? ' +50' : '');
+    drawText('Word score: ' + state.lastBase + ' x ' + state.lastMult + bonusText + ' = ' + state.lastPoints, uiCenterX(), 264, 18, 'rgb(220,220,220)');
+    drawText('Unused letters stay. Press Next Word to draw replacements.', uiCenterX(), 298, 15, 'rgb(255,225,130)');
+  }
+
+  function drawGameOverMessage() {
+    drawText('GAME OVER', uiCenterX(), 230, 34, 'white');
+    drawText(state.gameOverReason, uiCenterX(), 268, 18, 'rgb(255,170,120)');
+    drawText('Final score: ' + state.score, uiCenterX(), 302, 20, 'rgb(255,225,130)');
+  }
+
+  function drawCurrentWord(mult) {
+    const base = getWordScore(state.typedWord);
+    drawText(state.typedWord || '_', uiCenterX(), 240, 26, 'white');
+    drawText('Word score: ' + base + ' x ' + mult + ' = ' + (base * mult), uiCenterX(), 270, 16, 'rgb(220,220,220)');
+    drawText(state.message, uiCenterX(), 300, 15, state.dictionaryFailed ? 'rgb(255,170,120)' : 'rgb(255,225,130)');
+  }
+
+  function drawInstructions() {
+    drawText('Type in the box below. ENTER submits. Used letters are replaced.', uiCenterX(), 318, 14, 'rgb(200,200,200)');
+  }
+
+  function drawDebugLog() {
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.font = '12px Arial';
+    ctx.fillStyle = 'rgb(180,180,180)';
+    ctx.fillText('Debug log:', 12, canvas.height - 136);
+    for (let i = 0; i < state.debugLines.length; i++) {
+      ctx.fillText(state.debugLines[i], 12, canvas.height - 120 + i * 13);
+    }
+  }
+
+  function drawText(text, x, y, size, color, align) {
+    ctx.fillStyle = color;
+    ctx.font = size + 'px Arial';
+    ctx.textAlign = align || 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(text), x, y);
+  }
+
+  function roundedRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  }
+
+  function submitWord() {
+    if (!state.gameStarted || !state.dictionaryReady || state.phase !== 'playing') return;
+
+    state.typedWord = sanitizeTypedWord(wordInput.value);
+    wordInput.value = state.typedWord;
+
+    const elapsed = (performance.now() - state.roundStart) / 1000;
+
+    if (elapsed >= 30) {
+      showGameOver('Time ran out.');
+      return;
+    }
+
+    if (state.typedWord.length < 2) {
+      state.message = 'Use at least 2 letters.';
+      return;
+    }
+
+    if (!canMakeWordFromRack(state.typedWord, state.rack)) {
+      state.message = 'You can only use the visible rack letters.';
+      return;
+    }
+
+    if (!state.dictionary.has(state.typedWord)) {
+      state.message = state.typedWord + ' is not in the dictionary.';
+      clearTypedWord();
+      return;
+    }
+
+    const word = state.typedWord;
+    const base = getWordScore(word);
+    const mult = getMultiplier(elapsed);
+    let bonus = 0;
+    if (word.length === 6) bonus = 20;
+    if (word.length === 7) bonus = 50;
+
+    const points = base * mult + bonus;
+
+    scoreWord(points);
+    markUsedLettersFromWord(word);
+    clearTypedWord();
+    showResultScreen(word, base, mult, points);
+  }
+
+  function replaceUsedLettersFromWord(word) {
+    markUsedLettersFromWord(word);
+    removePendingUsedTiles();
+    fillRackToSeven();
+  }
+
+  function markUsedLettersFromWord(word) {
+    const used = new Array(state.rack.length).fill(false);
+    state.pendingUsedIndices = [];
+
+    for (const ch of word) {
+      for (let i = 0; i < state.rack.length; i++) {
+        const tile = state.rack[i];
+        if (!used[i] && tile && tile.letter === ch) {
+          used[i] = true;
+          state.pendingUsedIndices.push(i);
+          break;
+        }
+      }
+    }
+
+    addUnusedTileBonuses();
+  }
+
+  function removePendingUsedTiles() {
+    for (const index of state.pendingUsedIndices) {
+      state.rack[index] = null;
+    }
+    state.pendingUsedIndices = [];
+  }
+
+  function addUnusedTileBonuses() {
+    for (let i = 0; i < state.rack.length; i++) {
+      if (state.rack[i] && !state.pendingUsedIndices.includes(i)) {
+        state.rack[i].value += 2;
+        state.rack[i].age += 1;
+      }
+    }
+  }
+
+  function discardTiles() {
+    if (state.phase !== 'playing') return;
+
+    state.pendingUsedIndices = [];
+    for (let i = 0; i < 7; i++) state.rack[i] = null;
+    state.typedWord = '';
+    wordInput.value = '';
+
+    fillRackToSeven();
+
+    if (!hasPlayableTiles()) {
+      showGameOver('Out of tiles.');
+      return;
+    }
+
+    state.message = 'Tiles discarded. New rack.';
+    state.roundStart = performance.now();
+    wordInput.focus();
+  }
+
+  function fillRackToSeven() {
+    for (let i = 0; i < 7; i++) {
+      if (!state.rack[i]) {
+        const tile = drawTileFromPool();
+        if (!tile) break;
+        state.rack[i] = makeTile(tile);
+      }
+    }
+    state.tilesRemaining = state.tilePool.length;
+    return hasPlayableTiles();
+  }
+
+  function hasPlayableTiles() {
+    return state.rack.some(function (tile) {
+      return Boolean(tile);
+    });
+  }
+
+  function showGameOver(reason) {
+    removePendingUsedTiles();
+    state.phase = 'gameover';
+    state.gameOverReason = reason;
+    state.typedWord = '';
+    wordInput.value = '';
+    wordInput.style.display = 'none';
+    startButton.textContent = 'New Game';
+    startButton.style.display = 'block';
+    discardButton.style.display = 'none';
+  }
+
+  function scoreWord(points) {
+    state.score += points;
+  }
+
+  function clearTypedWord() {
+    state.typedWord = '';
+    wordInput.value = '';
+    wordInput.focus();
+  }
+
+  function randomLetter() {
+    return letterBag[Math.floor(Math.random() * letterBag.length)];
+  }
+
+  function makeTile(letter) {
+    return {
+      letter: letter,
+      value: letterScores[letter] || 0,
+      age: 0
+    };
+  }
+
+  function getTileFillColor(tile) {
+    const age = Math.min(tile.age, 8);
+    const r = Math.min(255, 238 + age * 2);
+    const g = Math.min(240, 238 + age);
+    const b = Math.max(120, 238 - age * 14);
+    return 'rgb(' + r + ',' + g + ',' + b + ')';
+  }
+
+  function makeTilePool(count) {
+    const pool = [];
+    for (let i = 0; i < count; i++) pool.push(randomLetter());
+    return pool;
+  }
+
+  function drawTileFromPool() {
+    if (state.tilePool.length === 0) return null;
+    const index = Math.floor(Math.random() * state.tilePool.length);
+    const tile = state.tilePool[index];
+    state.tilePool.splice(index, 1);
+    return tile;
+  }
+
+  function getTypedLetterUsage() {
+    const used = new Array(state.rack.length).fill(false);
+
+    for (const ch of state.typedWord) {
+      for (let i = 0; i < state.rack.length; i++) {
+        const tile = state.rack[i];
+        if (!used[i] && tile && tile.letter === ch) {
+          used[i] = true;
+          break;
+        }
+      }
+    }
+
+    return used;
+  }
+
+  function canMakeWordFromRack(word, currentRack) {
+    const counts = Object.create(null);
+    for (const tile of currentRack) {
+      if (tile) counts[tile.letter] = (counts[tile.letter] || 0) + 1;
+    }
+
+    for (const ch of word) {
+      counts[ch] = (counts[ch] || 0) - 1;
+      if (counts[ch] < 0) return false;
+    }
+
+    return true;
+  }
+
+  function getWordScore(word) {
+    const used = new Array(state.rack.length).fill(false);
+    let total = 0;
+
+    for (const ch of word) {
+      let matched = false;
+      for (let i = 0; i < state.rack.length; i++) {
+        const tile = state.rack[i];
+        if (!used[i] && tile && tile.letter === ch) {
+          used[i] = true;
+          total += tile.value;
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) total += letterScores[ch] || 0;
+    }
+
+    return total;
+  }
+
+  function getMultiplier(elapsed) {
+    if (elapsed <= 10) return 3;
+    if (elapsed <= 20) return 2;
+    return 1;
+  }
+
+  function sanitizeTypedWord(value) {
+    let result = '';
+    const upper = String(value).toUpperCase();
+
+    for (let i = 0; i < upper.length && result.length < 7; i++) {
+      const ch = upper.charAt(i);
+      if (isOnlyLetters(ch)) result += ch;
+    }
+
+    return result;
+  }
+
+  function sanitizeDictionaryWord(value) {
+    return String(value).replace(String.fromCharCode(13), '').trim().toUpperCase();
+  }
+
+  function isOnlyLetters(value) {
+    if (!value) return false;
+    for (let i = 0; i < value.length; i++) {
+      const code = value.charCodeAt(i);
+      if (code < 65 || code > 90) return false;
+    }
+    return true;
+  }
+
+  function debugLog(msg) {
+    const line = new Date().toLocaleTimeString() + ' - ' + String(msg);
+    state.debugLines.push(line);
+    if (state.debugLines.length > 9) state.debugLines.shift();
+    console.log('[Speed Word]', msg);
+  }
+
+  function runSelfTests() {
+    console.assert(uiCenterX() === canvas.width / 2, 'uiCenterX should return half the canvas width');
+    state.rack = [makeTile('C'), makeTile('A'), makeTile('T'), null, null, null, null];
+    console.assert(getWordScore('CAT') === 5, 'CAT should score 5');
+    let bonusTest = 0;
+    if ('PLANET'.length === 6) bonusTest = 20;
+    console.assert(bonusTest === 20, '6 letter words should give +20 bonus');
+    bonusTest = 0;
+    if ('PLANETS'.length === 7) bonusTest = 50;
+    console.assert(bonusTest === 50, '7 letter words should give +50 bonus');
+    console.assert(getMultiplier(0) === 3, '0 seconds should be 3x');
+    console.assert(getMultiplier(15) === 2, '15 seconds should be 2x');
+    console.assert(getMultiplier(25) === 1, '25 seconds should be 1x');
+    console.assert(sanitizeTypedWord('c-a,t!') === 'CAT', 'sanitizeTypedWord should keep only letters');
+    console.assert(sanitizeTypedWord('abcdefghi') === 'ABCDEFG', 'sanitizeTypedWord should limit to 7 letters');
+    console.assert(canMakeWordFromRack('CAT', [makeTile('C'), makeTile('A'), makeTile('T'), makeTile('S'), makeTile('E'), makeTile('R'), makeTile('N')]) === true, 'CAT should be buildable');
+    console.assert(canMakeWordFromRack('CAT', [makeTile('C'), makeTile('A'), makeTile('S'), makeTile('E'), makeTile('R'), makeTile('N'), makeTile('O')]) === false, 'CAT should require T');
+    console.assert(canMakeWordFromRack('BOO', [makeTile('B'), makeTile('O'), makeTile('O'), makeTile('K'), makeTile('E'), makeTile('R'), makeTile('S')]) === true, 'BOO should allow duplicate O when available');
+    console.assert(canMakeWordFromRack('BOO', [makeTile('B'), makeTile('O'), makeTile('K'), makeTile('E'), makeTile('R'), makeTile('S'), makeTile('T')]) === false, 'BOO should reject missing duplicate O');
+    console.assert(canMakeWordFromRack('CAT', [makeTile('C'), makeTile('A'), null, makeTile('T'), null, null, null]) === true, 'CAT should work with empty rack slots');
+    console.assert(canMakeWordFromRack('CAN', [makeTile('C'), makeTile('A'), null, makeTile('T'), null, null, null]) === false, 'Empty rack slots should not count as wildcards');
+
+    const ageTile = makeTile('A');
+    console.assert(ageTile.age === 0, 'new tiles should start at age 0');
+    state.rack = [ageTile, null, null, null, null, null, null];
+    state.pendingUsedIndices = [];
+    addUnusedTileBonuses();
+    console.assert(ageTile.age === 1 && ageTile.value === 3, 'unused tiles should gain age and 2 points');
+
+    const usedTile = makeTile('B');
+    state.rack = [usedTile, null, null, null, null, null, null];
+    markUsedLettersFromWord('B');
+    console.assert(state.rack[0] !== null && state.pendingUsedIndices[0] === 0, 'used tiles should remain visible until next round');
+    removePendingUsedTiles();
+    console.assert(state.rack[0] === null, 'pending used tiles should be removed when next round starts');
+
+    const testPool = makeTilePool(10);
+    console.assert(testPool.length === 10, 'makeTilePool should create the requested number of tiles');
+    const savedPool = state.tilePool;
+    const savedRack = state.rack;
+    const savedPending = state.pendingUsedIndices;
+    state.tilePool = [];
+    state.rack = [null, null, null, null, null, null, null];
+    state.pendingUsedIndices = [];
+    console.assert(fillRackToSeven() === false, 'fillRackToSeven should fail when no tiles are available and rack is empty');
+    state.rack = [makeTile('A'), null, null, null, null, null, null];
+    state.tilePool = [];
+    console.assert(fillRackToSeven() === true, 'fillRackToSeven should allow play when rack still has tiles, even with empty pool');
+    state.tilePool = savedPool;
+    state.rack = savedRack;
+    state.pendingUsedIndices = savedPending;
+
+    debugLog('self-tests completed');
+  }
+
+  setupGame();
+})();
+</script>
+</body>
+</html>
+
